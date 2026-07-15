@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Реестр погашений</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <main class="shell">
+        <section class="workspace">
+            <div class="intro">
+                <p class="eyebrow">Банковские выписки</p>
+                <h1>Формирование реестра погашений</h1>
+                <p>Загрузите выписки банка, справочник заемщиков и при необходимости файлы расшифровок.</p>
+            </div>
+
+            <form enctype="multipart/form-data" class="upload-form" id="uploadForm">
+                <div class="alert" id="errorAlert" role="alert" hidden></div>
+
+                <div class="field-grid">
+                    <label class="file-field">
+                        <span>Банковские выписки</span>
+                        <input type="file" name="statement_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple required>
+                        <small>Один или несколько Excel-файлов с платежами банка</small>
+                    </label>
+
+                    <label class="file-field">
+                        <span>Справочник заемщиков</span>
+                        <input type="file" name="reference_file" accept=".xlsx,.xlsm,.xltx,.xls" required>
+                        <small>Excel-файл со столбцами Взыскатель, ДБЗ, ИИН, ФИО</small>
+                    </label>
+
+                    <label class="file-field">
+                        <span>Файлы расшифровок</span>
+                        <input type="file" name="detail_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple>
+                        <small>Необязательно: Astana-Plat, Казпочта, Народный или Евразийский банк</small>
+                    </label>
+                </div>
+
+                <div class="processing-status" id="processingStatus" aria-live="polite">
+                    <div class="spinner" aria-hidden="true"></div>
+                    <div class="processing-copy">
+                        <strong id="processingMessage">Подготовка файлов</strong>
+                        <div class="processing-meta">
+                            <span>Время: <output id="processingTimer">00:00</output></span>
+                            <span><output id="processingPercent">0</output>%</span>
+                        </div>
+                        <progress id="processingProgress" max="100" value="0">0%</progress>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="primary-button" id="submitButton">Запустить обработку</button>
+                    <button type="button" class="danger-button" id="cancelButton" hidden>Отменить</button>
+                </div>
+            </form>
+
+            <section class="result" id="resultPanel" aria-live="polite" hidden>
+                <div class="result-heading">
+                    <p class="eyebrow">Готово</p>
+                    <h2>Реестр сформирован</h2>
+                    <p>Результат доступен в течение 30 минут и восстановится после обновления страницы.</p>
+                </div>
+
+                <div class="stats">
+                    <div><strong data-stat="total">0</strong><span>строк в выписках</span></div>
+                    <div><strong data-stat="generated">0</strong><span>записей после разбора</span></div>
+                    <div><strong data-stat="matched">0</strong><span>найдено</span></div>
+                    <div><strong data-stat="notFound">0</strong><span>не найдено</span></div>
+                    <div><strong data-stat="excluded">0</strong><span>исключено</span></div>
+                    <div><strong data-stat="split">0</strong><span>из расшифровок</span></div>
+                </div>
+
+                <button type="button" class="primary-button" id="downloadButton">Скачать registry.xlsx</button>
+            </section>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

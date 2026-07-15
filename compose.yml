@@ -1,0 +1,25 @@
+services:
+  web:
+    build: .
+    image: payments-summary-transfer:prod
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-9991}:8000"
+    environment:
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-100}"
+      PROCESSING_WORKERS: "${PROCESSING_WORKERS:-4}"
+      RESULT_TTL_MINUTES: "${RESULT_TTL_MINUTES:-30}"
+      NER_MODEL: "${NER_MODEL:-fastino/gliner2-multi-v1}"
+      NER_BATCH_SIZE: "${NER_BATCH_SIZE:-8}"
+      HF_HOME: /models/huggingface
+    volumes:
+      - gliner-model-cache:/models/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read(1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  gliner-model-cache:
