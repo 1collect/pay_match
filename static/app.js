@@ -15,6 +15,38 @@
     const downloadButton = document.getElementById("downloadButton");
     const errorAlert = document.getElementById("errorAlert");
 
+    const fileInputs = [
+        {
+            input: document.getElementById("statementFiles"),
+            output: document.getElementById("statementSelection"),
+            empty: "Файлы не выбраны",
+        },
+        {
+            input: document.getElementById("referenceFile"),
+            output: document.getElementById("referenceSelection"),
+            empty: "Файл не выбран",
+        },
+        {
+            input: document.getElementById("detailFiles"),
+            output: document.getElementById("detailSelection"),
+            empty: "Файлы не выбраны",
+        },
+    ];
+
+    fileInputs.forEach(({ input, output, empty }) => {
+        input.addEventListener("change", () => {
+            const files = Array.from(input.files || []);
+            input.closest(".file-field").classList.toggle("has-files", files.length > 0);
+            if (!files.length) {
+                output.textContent = empty;
+            } else if (files.length === 1) {
+                output.textContent = files[0].name;
+            } else {
+                output.textContent = `Выбрано файлов: ${files.length}`;
+            }
+        });
+    });
+
     const createId = () => {
         if (crypto.randomUUID) return crypto.randomUUID();
         return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
@@ -62,7 +94,9 @@
         status.classList.toggle("is-visible", processing);
         submitButton.disabled = processing;
         cancelButton.hidden = !processing;
-        submitButton.textContent = processing ? "Обработка..." : "Запустить обработку";
+        submitButton.querySelector("span").textContent = processing
+            ? "Обработка..."
+            : "Запустить обработку";
         if (!processing) stopTimer();
     };
 

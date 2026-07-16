@@ -3,64 +3,121 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f7f4">
     <title>Реестр погашений</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
     <main class="shell">
+        <header class="topbar" aria-label="Реестр погашений">
+            <a class="brand" href="/" aria-label="На главную">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M7 3.75h8.5L19 7.3v12.95H7z"/><path d="M15 3.75V8h4M10.5 12h5M10.5 15.5h5"/></svg>
+                </span>
+                <span>Реестр погашений</span>
+            </a>
+            <span class="privacy-note"><span aria-hidden="true"></span> Файлы не сохраняются</span>
+        </header>
+
         <section class="workspace">
             <div class="intro">
                 <p class="eyebrow">Банковские выписки</p>
                 <h1>Формирование реестра погашений</h1>
-                <p>Загрузите выписки банка, справочник заемщиков и при необходимости файлы расшифровок.</p>
+                <p class="intro-copy">Загрузите выписки банка, справочник заемщиков и при необходимости файлы расшифровок.</p>
             </div>
 
             <form enctype="multipart/form-data" class="upload-form" id="uploadForm">
                 <div class="alert" id="errorAlert" role="alert" hidden></div>
 
+                <div class="section-heading">
+                    <span class="step-number">01</span>
+                    <div>
+                        <h2>Добавьте файлы</h2>
+                        <p>Поддерживаются форматы XLSX, XLSM, XLTX и XLS</p>
+                    </div>
+                </div>
+
                 <div class="field-grid">
                     <label class="file-field">
-                        <span>Банковские выписки</span>
-                        <input type="file" name="statement_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple required>
+                        <span class="file-field__top">
+                            <span class="file-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14.5v4.75h14V14.5"/></svg>
+                            </span>
+                            <span class="field-badge">Обязательно</span>
+                        </span>
+                        <span class="file-field__title">Банковские выписки</span>
                         <small>Один или несколько Excel-файлов с платежами банка</small>
+                        <input id="statementFiles" type="file" name="statement_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple required>
+                        <span class="file-selection" id="statementSelection">Файлы не выбраны</span>
                     </label>
 
                     <label class="file-field">
-                        <span>Справочник заемщиков</span>
-                        <input type="file" name="reference_file" accept=".xlsx,.xlsm,.xltx,.xls" required>
-                        <small>Excel-файл со столбцами Взыскатель, ДБЗ, ИИН, ФИО</small>
+                        <span class="file-field__top">
+                            <span class="file-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14.5v4.75h14V14.5"/></svg>
+                            </span>
+                            <span class="field-badge">Обязательно</span>
+                        </span>
+                        <span class="file-field__title">Справочник заемщиков</span>
+                        <small>Excel-файл со столбцами Взыскатель, ДБЗ, ИИН и ФИО</small>
+                        <input id="referenceFile" type="file" name="reference_file" accept=".xlsx,.xlsm,.xltx,.xls" required>
+                        <span class="file-selection" id="referenceSelection">Файл не выбран</span>
                     </label>
 
-                    <label class="file-field">
-                        <span>Файлы расшифровок</span>
-                        <input type="file" name="detail_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple>
-                        <small>Необязательно: Astana-Plat, Казпочта, Народный или Евразийский банк</small>
+                    <label class="file-field file-field--optional">
+                        <span class="file-field__top">
+                            <span class="file-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14.5v4.75h14V14.5"/></svg>
+                            </span>
+                            <span class="field-badge field-badge--muted">Необязательно</span>
+                        </span>
+                        <span class="file-field__title">Файлы расшифровок</span>
+                        <small>Astana-Plat, Казпочта, Народный или Евразийский банк</small>
+                        <input id="detailFiles" type="file" name="detail_files" accept=".xlsx,.xlsm,.xltx,.xls" multiple>
+                        <span class="file-selection" id="detailSelection">Файлы не выбраны</span>
                     </label>
                 </div>
 
                 <div class="processing-status" id="processingStatus" aria-live="polite">
                     <div class="spinner" aria-hidden="true"></div>
                     <div class="processing-copy">
-                        <strong id="processingMessage">Подготовка файлов</strong>
-                        <div class="processing-meta">
-                            <span>Время: <output id="processingTimer">00:00</output></span>
+                        <div class="processing-meta processing-meta--top">
+                            <strong id="processingMessage">Подготовка файлов</strong>
                             <span><output id="processingPercent">0</output>%</span>
                         </div>
                         <progress id="processingProgress" max="100" value="0">0%</progress>
+                        <div class="processing-meta">
+                            <span>Обработка данных</span>
+                            <span>Прошло <output id="processingTimer">00:00</output></span>
+                        </div>
                     </div>
                 </div>
 
-                <div class="form-actions">
-                    <button type="submit" class="primary-button" id="submitButton">Запустить обработку</button>
-                    <button type="button" class="danger-button" id="cancelButton" hidden>Отменить</button>
+                <div class="form-footer">
+                    <div class="form-actions">
+                        <button type="submit" class="primary-button" id="submitButton">
+                            <span>Запустить обработку</span>
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+                        </button>
+                        <button type="button" class="danger-button" id="cancelButton" hidden>Отменить</button>
+                    </div>
+                    <p class="footer-note">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3M5.5 10h13v10h-13z"/></svg>
+                        Данные обрабатываются в защищенной сессии
+                    </p>
                 </div>
             </form>
 
             <section class="result" id="resultPanel" aria-live="polite" hidden>
                 <div class="result-heading">
-                    <p class="eyebrow">Готово</p>
-                    <h2>Реестр сформирован</h2>
-                    <p>Результат доступен в течение 30 минут и восстановится после обновления страницы.</p>
+                    <span class="success-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m7 12.5 3.2 3.2L17.5 8.5"/></svg>
+                    </span>
+                    <div>
+                        <p class="eyebrow">Обработка завершена</p>
+                        <h2>Реестр сформирован</h2>
+                        <p>Результат доступен в течение 30 минут и восстановится после обновления страницы.</p>
+                    </div>
                 </div>
 
                 <div class="stats">
@@ -72,9 +129,17 @@
                     <div><strong data-stat="split">0</strong><span>из расшифровок</span></div>
                 </div>
 
-                <button type="button" class="primary-button" id="downloadButton">Скачать registry.xlsx</button>
+                <button type="button" class="primary-button" id="downloadButton">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4.5-4.5M12 16l-4.5-4.5"/><path d="M5 19.5h14"/></svg>
+                    <span>Скачать registry.xlsx</span>
+                </button>
             </section>
         </section>
+
+        <footer class="page-footer">
+            <span>Локальная обработка</span>
+            <span>Результат хранится 30 минут</span>
+        </footer>
     </main>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
