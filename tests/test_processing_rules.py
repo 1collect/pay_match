@@ -8,7 +8,11 @@ from processor.services.excel_processor import (
     _contains_excluded_keyword,
     _normalize_identifier,
 )
-from processor.services.name_matching import match_person_name
+from processor.services.name_matching import (
+    match_person_name,
+    match_person_name_nominative,
+    nominative_person_name_tokens,
+)
 from processor.services.ner_service import NameExtraction
 from processor.services.new_format_processor import (
     NewBankStatementProcessor,
@@ -84,6 +88,61 @@ class ProcessingRuleTests(unittest.TestCase):
             match_person_name(
                 "Нуриева Сания Ирлановна",
                 "Нуриевой Сании Ирлановны",
+            )
+        )
+
+    def test_name_matching_retries_in_nominative_case(self) -> None:
+        reference_name = "Петров Пётр Петрович"
+        declined_name = "Петровым Петром Петровичем"
+
+        self.assertIsNone(match_person_name(reference_name, declined_name))
+        self.assertIsNotNone(
+            match_person_name_nominative(reference_name, declined_name)
+        )
+
+    def test_name_matching_normalizes_declined_reference_column(self) -> None:
+        self.assertIsNotNone(
+            match_person_name_nominative(
+                "Петровым Петром Петровичем",
+                "Петров Пётр Петрович",
+            )
+        )
+
+    def test_nominative_kazakh_and_feminine_names_are_not_rewritten(self) -> None:
+        expected_names = {
+            "Купесбаева Айнұр Бикенқызы": (
+                "купесбаева",
+                "айнұр",
+                "бикенқызы",
+            ),
+            "Жанбетова Сауле Тыныштекбаевна": (
+                "жанбетова",
+                "сауле",
+                "тыныштекбаевна",
+            ),
+            "СЕЙДІЛДА ЕЛДОС БӨКЕНҰЛЫ": (
+                "сейділда",
+                "елдос",
+                "бөкенұлы",
+            ),
+        }
+        for name, expected in expected_names.items():
+            with self.subTest(name=name):
+                self.assertEqual(nominative_person_name_tokens(name), expected)
+
+    def test_real_statement_name_is_converted_from_genitive(self) -> None:
+        declined_name = "Зленко Ивана Анатольевича"
+        self.assertEqual(
+            nominative_person_name_tokens(declined_name),
+            ("зленко", "иван", "анатольевич"),
+        )
+        self.assertIsNone(
+            match_person_name("Зленко Иван Анатольевич", declined_name)
+        )
+        self.assertIsNotNone(
+            match_person_name_nominative(
+                "Зленко Иван Анатольевич",
+                declined_name,
             )
         )
 

@@ -36,7 +36,12 @@ from .excel_processor import (
     _read_excel_raw,
     _split_variants,
 )
-from .name_matching import match_person_name, name_lookup_keys
+from .name_matching import (
+    match_person_name,
+    match_person_name_nominative,
+    name_lookup_keys,
+    nominative_name_lookup_keys,
+)
 from .ner_service import PersonNameExtractor
 
 
@@ -1649,6 +1654,7 @@ def _find_in_new_text(
         for entry in reference.by_dbz.get(dbz_key, []):
             _new_candidate_for(candidates, entry).criteria.add("ДБЗ")
 
+    direct_name_match_found = False
     for detected_name in detected_names:
         name_entries: dict[int, NewReferenceEntry] = {}
         for lookup_key in name_lookup_keys(detected_name):
@@ -1658,10 +1664,28 @@ def _find_in_new_text(
             evidence = match_person_name(entry.fio, detected_name)
             if not evidence:
                 continue
+            direct_name_match_found = True
             candidate = _new_candidate_for(candidates, entry)
             candidate.criteria.add(evidence.criterion)
             candidate.detected_name = detected_name
             candidate.name_strength = max(candidate.name_strength, evidence.strength)
+
+    # Preserve the current matching order. Only if none of the original GLiNER
+    # name variants matched, remove grammatical case endings and try once more.
+    if detected_names and not direct_name_match_found:
+        for detected_name in detected_names:
+            name_entries = {}
+            for lookup_key in nominative_name_lookup_keys(detected_name):
+                for entry in reference.by_name_token.get(lookup_key, []):
+                    name_entries[entry.row_id] = entry
+            for entry in name_entries.values():
+                evidence = match_person_name_nominative(entry.fio, detected_name)
+                if not evidence:
+                    continue
+                candidate = _new_candidate_for(candidates, entry)
+                candidate.criteria.add(evidence.criterion)
+                candidate.detected_name = detected_name
+                candidate.name_strength = max(candidate.name_strength, evidence.strength)
 
     valid_candidates = list(candidates.values())
     if not valid_candidates:
@@ -1733,8 +1757,10 @@ def _best_new_candidate(candidates: Any) -> NewCandidate | None:
 
 def _entry_tokens(entry: NewReferenceEntry) -> set[str]:
     tokens = name_lookup_keys(entry.fio)
+    tokens.update(nominative_name_lookup_keys(entry.fio))
     for keyword in entry.keywords:
         tokens.update(name_lookup_keys(keyword))
+        tokens.update(nominative_name_lookup_keys(keyword))
     return tokens
 
 

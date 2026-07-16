@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from dataclasses import dataclass
 from typing import Any
+
+import pymorphy3
 
 
 NAME_LETTERS_PATTERN = re.compile(r"[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]")
@@ -38,9 +41,99 @@ def name_lookup_keys(value: Any) -> set[str]:
     return keys
 
 
+@lru_cache(maxsize=1)
+def _morph_analyzer() -> pymorphy3.MorphAnalyzer:
+    return pymorphy3.MorphAnalyzer()
+
+
+@lru_cache(maxsize=20_000)
+def _nominative_person_token(token: str, preserve_feminine_name: bool) -> str:
+    if len(token) <= 1 or not re.fullmatch(NAME_TOKEN_PATTERN, token):
+        return token
+    if re.search(r"[әғқңөұүһі]", token) or token.endswith(
+        ("ұлы", "улы", "қызы", "кызы")
+    ):
+        return token
+    parses = _morph_analyzer().parse(token)
+    name_parses = [
+        parsed
+        for parsed in parses
+        if parsed.tag.grammemes & {"Name", "Surn", "Patr"}
+        and "sing" in parsed.tag.grammemes
+    ]
+    # A nominative interpretation can rank below a more common Russian word
+    # interpretation, especially for Kazakh and feminine names. In that case
+    # the original token is already safe and must not be changed.
+    if any("nomn" in parsed.tag.grammemes for parsed in name_parses):
+        return token
+    if preserve_feminine_name and token.endswith(("а", "я", "е")) and any(
+        "Name" in parsed.tag.grammemes for parsed in name_parses
+    ):
+        return token
+    for parsed in name_parses:
+        nominative = parsed.inflect({"nomn"})
+        if nominative:
+            return normalize_person_token(nominative.word)
+    return token
+
+
+def nominative_person_name_tokens(value: Any) -> tuple[str, ...]:
+    """Return name tokens with Russian grammatical endings removed."""
+    tokens = person_name_tokens(value)
+    has_male_patronymic = any(
+        re.search(r"(?:вич|вича|вичу|вичем|виче)$", token)
+        for token in tokens
+    )
+    has_female_marker = any(
+        re.search(r"(?:вна|вны|вной|чна|чны|чной|ова|ева|ина|ская)$", token)
+        for token in tokens
+    )
+    preserve_feminine_name = has_female_marker and not has_male_patronymic
+    return tuple(
+        _nominative_person_token(token, preserve_feminine_name)
+        for token in tokens
+    )
+
+
+def nominative_name_lookup_keys(value: Any) -> set[str]:
+    keys: set[str] = set()
+    for token in nominative_person_name_tokens(value):
+        if len(token) < 2:
+            continue
+        keys.add(token)
+        if len(token) >= 5:
+            keys.add(f"^{token[:5]}")
+    return keys
+
+
 def match_person_name(reference_name: Any, detected_name: Any) -> NameMatchEvidence | None:
     reference = person_name_tokens(reference_name)
     detected = person_name_tokens(detected_name)
+    if len(reference) < 2 or len(detected) < 2:
+        return None
+
+    tokenizations = [detected]
+    expanded = _expand_compact_initials(detected, reference)
+    if expanded != detected:
+        tokenizations.append(expanded)
+
+    matches = [
+        evidence
+        for tokens in tokenizations
+        if (evidence := _match_tokens(reference, tokens)) is not None
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item.strength)
+
+
+def match_person_name_nominative(
+    reference_name: Any,
+    detected_name: Any,
+) -> NameMatchEvidence | None:
+    """Retry a name match after converting both names to dictionary forms."""
+    reference = nominative_person_name_tokens(reference_name)
+    detected = nominative_person_name_tokens(detected_name)
     if len(reference) < 2 or len(detected) < 2:
         return None
 
