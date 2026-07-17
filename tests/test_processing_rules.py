@@ -17,6 +17,7 @@ from processor.services.ner_service import NameExtraction
 from processor.services.new_format_processor import (
     NewBankStatementProcessor,
     ProcessingCancelled,
+    _detail_type_for_path,
 )
 
 
@@ -35,6 +36,32 @@ class FakeNameExtractor:
 
 
 class ProcessingRuleTests(unittest.TestCase):
+    def test_detail_type_supports_filename_prefixes(self) -> None:
+        cases = {
+            "CAFIRSTCOLLECTIONBURO_report.xlsx": "halyk",
+            "astanaplat_weekend.xls": "astana",
+            "20260715_anything.xlsx": "eurasian",
+            "15631_report.xls": "kazpost",
+            "5400-anything.xlsx": "kazpost",
+            "15522.xlsx": "kazpost",
+        }
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(_detail_type_for_path(Path(filename)), expected)
+
+        self.assertEqual(_detail_type_for_path(Path("20261340_invalid.xlsx")), "")
+
+    def test_detail_type_keeps_legacy_filename_keywords(self) -> None:
+        cases = {
+            "details_astanaplat.xlsx": "astana",
+            "details_eurasian.xls": "eurasian",
+            "details_kazpost.xlsx": "kazpost",
+            "details_halyk.xls": "halyk",
+        }
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(_detail_type_for_path(Path(filename)), expected)
+
     def test_numeric_exclusion_does_not_match_inside_iin(self) -> None:
         self.assertFalse(
             _contains_excluded_keyword("иин 010812600769", "108126")

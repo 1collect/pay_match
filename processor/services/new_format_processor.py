@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1397,6 +1398,16 @@ def _is_detail_empty(value: Any) -> bool:
 
 def _detail_type_for_path(path: Path) -> str:
     compact_name = _compact_text(path.stem)
+    if compact_name.startswith("cafirstcollectionburo"):
+        return "halyk"
+    if _starts_with_yyyymmdd(path.stem):
+        return "eurasian"
+    if compact_name.startswith(("15631", "5400", "15522")):
+        return "kazpost"
+    if compact_name.startswith("astanaplat"):
+        return "astana"
+
+    # Keep supporting the older keyword-based filenames.
     if "astanaplat" in compact_name or "астанаплат" in compact_name:
         return "astana"
     if "евраз" in compact_name or "eurasian" in compact_name or "evraz" in compact_name:
@@ -1412,6 +1423,17 @@ def _detail_type_for_path(path: Path) -> str:
     ):
         return "halyk"
     return ""
+
+
+def _starts_with_yyyymmdd(value: str) -> bool:
+    match = re.match(r"^(\d{8})", value.strip())
+    if not match:
+        return False
+    try:
+        datetime.strptime(match.group(1), "%Y%m%d")
+    except ValueError:
+        return False
+    return True
 
 
 def _detail_type_for_record(record: NewPaymentRecord) -> str:
