@@ -1930,6 +1930,20 @@ def _find_in_new_text(
             for candidate in top_candidates
             if candidate.name_strength == top_name_strength
         ]
+    top_candidates, debt_reason = _filter_candidates_by_debt_balance(
+        top_candidates,
+        record.amount,
+    )
+    if debt_reason:
+        best = top_candidates[0]
+        return NewMatch(
+            entry=None,
+            detected_iin=best.detected_iin,
+            detected_name=best.detected_name,
+            criteria=tuple(sorted(best.criteria)),
+            reason=debt_reason,
+            source=source,
+        )
     if len({_normalize_identifier(candidate.entry.dbz) for candidate in top_candidates}) > 1:
         best = top_candidates[0]
         shared_iin = any("ИИН" in candidate.criteria for candidate in top_candidates)
@@ -1947,6 +1961,32 @@ def _find_in_new_text(
         )
 
     best = top_candidates[0]
+    if "ДБЗ" in best.criteria:
+        if best.entry.debt_balance is None:
+            return NewMatch(
+                entry=None,
+                detected_iin=best.detected_iin,
+                detected_name=best.detected_name,
+                criteria=tuple(sorted(best.criteria)),
+                reason=(
+                    f"Для указанного в назначении ДБЗ {best.entry.dbz} "
+                    "не указан остаток задолженности"
+                ),
+                source=source,
+            )
+        if record.amount > best.entry.debt_balance + MONEY_TOLERANCE:
+            return NewMatch(
+                entry=None,
+                detected_iin=best.detected_iin,
+                detected_name=best.detected_name,
+                criteria=tuple(sorted(best.criteria)),
+                reason=(
+                    f"Переплата по ДБЗ {best.entry.dbz}: сумма платежа "
+                    f"{_round_money(record.amount)} превышает остаток задолженности "
+                    f"{_round_money(best.entry.debt_balance)}"
+                ),
+                source=source,
+            )
     return NewMatch(
         entry=best.entry,
         detected_iin=best.detected_iin,
@@ -1954,6 +1994,45 @@ def _find_in_new_text(
         criteria=tuple(sorted(best.criteria)),
         source=source,
     )
+
+
+def _filter_candidates_by_debt_balance(
+    candidates: list[NewCandidate],
+    payment_amount: float,
+) -> tuple[list[NewCandidate], str]:
+    if not candidates or any("ДБЗ" not in candidate.criteria for candidate in candidates):
+        return candidates, ""
+
+    dbz_values = {
+        _normalize_identifier(candidate.entry.dbz)
+        for candidate in candidates
+        if candidate.entry.dbz
+    }
+    if len(dbz_values) <= 1:
+        return candidates, ""
+
+    unknown_balance = [
+        candidate
+        for candidate in candidates
+        if candidate.entry.debt_balance is None
+    ]
+    affordable = [
+        candidate
+        for candidate in candidates
+        if candidate.entry.debt_balance is not None
+        and payment_amount <= candidate.entry.debt_balance + MONEY_TOLERANCE
+    ]
+    if unknown_balance:
+        return candidates, (
+            "Невозможно проверить переплату: не для всех ДБЗ, указанных "
+            "в назначении, указан остаток задолженности"
+        )
+    if not affordable:
+        return candidates, (
+            "Переплата по ДБЗ, указанным в назначении: сумма платежа "
+            "превышает остаток задолженности по каждому из них"
+        )
+    return affordable, ""
 
 
 def _new_candidate_for(
@@ -2003,6 +2082,9 @@ def _is_blocking_new_match(match: NewMatch) -> bool:
     return (
         "два или более дбз" in lowered_reason
         or "неоднознач" in lowered_reason
+        or "переплат" in lowered_reason
+        or "несколько дбз" in lowered_reason
+        or "не указан остаток задолженности" in lowered_reason
     )
 
 

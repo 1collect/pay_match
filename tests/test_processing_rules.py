@@ -230,6 +230,100 @@ class ProcessingRuleTests(unittest.TestCase):
             self.assertEqual([row["Общая задолженность"] for row in rows], [300, 300])
             workbook.close()
 
+    def test_debt_balance_checks_only_dbz_named_in_purpose(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            statement = root / "statement.xlsx"
+            reference = root / "reference.xlsx"
+            output = root / "output"
+
+            statement_book = Workbook()
+            statement_sheet = statement_book.active
+            statement_sheet.append(["Дата", "Отправитель", "Кредит", "Назначение платежа"])
+            statement_sheet.append(
+                ["15.07.2026", "Плательщик", 250, "Оплата ИИН 900101300001"]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    "Плательщик",
+                    150,
+                    "Оплата ИИН 900101300001 ДБЗ: DBZ-1",
+                ]
+            )
+            statement_sheet.append(
+                ["15.07.2026", "Плательщик", 150, "Оплата ИИН 900101300001"]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    "Плательщик",
+                    150,
+                    "Оплата ИИН 900101300001 ДБЗ: DBZ-1 DBZ-2",
+                ]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    "Плательщик",
+                    10,
+                    "Оплата ИИН 900101300001 ДБЗ: DBZ-4",
+                ]
+            )
+            statement_book.save(statement)
+
+            reference_book = Workbook()
+            reference_sheet = reference_book.active
+            reference_sheet.append(
+                ["Взыскатель", "ДБЗ", "ИИН", "ФИО", "Остаток долга"]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-1", "900101300001", "Иванов Иван", 100]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-2", "900101300001", "Иванов Иван", 200]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-3", "900101300001", "Иванов Иван", 1000]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-4", "900101300001", "Иванов Иван", None]
+            )
+            reference_book.save(reference)
+
+            result = NewBankStatementProcessor(FakeNameExtractor({})).process_many(
+                statement_paths=[statement],
+                reference_path=reference,
+                output_dir=output,
+            )
+
+            workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
+            payment_headers = [cell.value for cell in workbook["Оплата"][1]]
+            payment_rows = [
+                dict(zip(payment_headers, row))
+                for row in workbook["Оплата"].iter_rows(min_row=2, values_only=True)
+            ]
+            self.assertEqual(len(payment_rows), 1)
+            self.assertEqual(payment_rows[0]["ДБЗ"], "DBZ-2")
+
+            not_found_headers = [cell.value for cell in workbook["Не найдено"][1]]
+            not_found_rows = [
+                dict(zip(not_found_headers, row))
+                for row in workbook["Не найдено"].iter_rows(min_row=2, values_only=True)
+            ]
+            self.assertEqual(len(not_found_rows), 4)
+            reasons = [row["Причина"].lower() for row in not_found_rows]
+            self.assertEqual(sum("переплат" in reason for reason in reasons), 1)
+            self.assertEqual(
+                sum("два или более дбз" in reason for reason in reasons),
+                2,
+            )
+            self.assertEqual(
+                sum("не указан остаток задолженности" in reason for reason in reasons),
+                1,
+            )
+            workbook.close()
+
     def test_numeric_exclusion_does_not_match_inside_iin(self) -> None:
         self.assertFalse(
             _contains_excluded_keyword("иин 010812600769", "108126")
