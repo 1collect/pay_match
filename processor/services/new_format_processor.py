@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
+from xml.etree import ElementTree
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -15,7 +17,6 @@ from .excel_processor import (
     _build_company_summary_df,
     _build_headers,
     _clean_cell,
-    _clean_output_fio,
     _contains_excluded_keyword,
     _extract_dbz_keys,
     _extract_filename_account,
@@ -49,7 +50,7 @@ from .ner_service import PersonNameExtractor
 NEW_OUTPUT_COLUMNS = [
     "ДБЗ",
     "ИИН",
-    "ФИО (заёмщика)",
+    "Общая задолженность",
     "Дата",
     "Отправитель",
     "Сумма",
@@ -218,6 +219,7 @@ DETAIL_ALIASES = {
             "account",
             "contract",
         ],
+        "date": ["дата платежа", "дата/время", "дата время", "date"],
         "fio": [
             "фио",
             "фио плательщика",
@@ -245,6 +247,7 @@ DETAIL_ALIASES = {
             "бин/иин",
             "iin",
         ],
+        "date": ["дата платежа", "дата", "date"],
         "fio": [
             "фио плательщика",
             "фио",
@@ -267,6 +270,7 @@ DETAIL_ALIASES = {
             "иин заёмщика",
             "iin",
         ],
+        "date": ["дата платежа", "дата", "date"],
         "fio": [
             "фио заемщика",
             "фио заёмщика",
@@ -294,6 +298,13 @@ DETAIL_ALIASES = {
             "иин",
             "бин/иин",
             "iin",
+        ],
+        "date": [
+            "дата зачисления на счет",
+            "дата и время платежа на терминале",
+            "дата платежа",
+            "дата",
+            "date",
         ],
         "fio": [
             "фио плательщика",
@@ -469,6 +480,7 @@ class DetailColumns:
     amount: str | None = None
     iin: str | None = None
     fio: str | None = None
+    date: str | None = None
 
 
 @dataclass
@@ -486,6 +498,7 @@ class DetailBatch:
     detail_type: str
     company_key: str = ""
     company_name: str = ""
+    detail_date: date | None = None
     rows: list[DetailPaymentRow] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
 
@@ -579,8 +592,7 @@ class NewBankStatementProcessor:
         _report_progress(on_progress, 46, "GLiNER 2 извлекает ФИО из платежей")
         self._extract_record_names(all_records, should_cancel)
 
-        detail_records_by_batch: dict[tuple[str, str], list[NewPaymentRecord]] = {}
-        normal_records: list[NewPaymentRecord] = []
+        detail_candidate_records: list[NewPaymentRecord] = []
         _report_progress(on_progress, 48, "Подготавливаем платежи к сопоставлению")
         for record_index, record in enumerate(all_records):
             if record_index % 100 == 0:
@@ -592,12 +604,12 @@ class NewBankStatementProcessor:
                 )
                 continue
 
-            detail_type = _detail_type_for_record(record)
-            batch_key = _detail_batch_key_for_record(record, detail_type, detail_batches)
-            if batch_key:
-                detail_records_by_batch.setdefault(batch_key, []).append(record)
-            else:
-                normal_records.append(record)
+            detail_candidate_records.append(record)
+
+        detail_records_by_batch, normal_records = _route_detail_records(
+            detail_candidate_records,
+            detail_batches,
+        )
 
         routed_records = (
             len(normal_records)
@@ -861,9 +873,10 @@ class NewBankStatementProcessor:
         self,
         detail_paths: list[Path],
         should_cancel: Callable[[], bool] | None = None,
-    ) -> tuple[dict[tuple[str, str], DetailBatch], list[str]]:
-        batches: dict[tuple[str, str], DetailBatch] = {}
+    ) -> tuple[dict[tuple[str, str, str], DetailBatch], list[str]]:
+        batches: dict[tuple[str, str, str], DetailBatch] = {}
         warnings: list[str] = []
+        hashes: dict[str, str] = {}
 
         for detail_path in detail_paths:
             _check_cancelled(should_cancel)
@@ -874,18 +887,35 @@ class NewBankStatementProcessor:
                 )
                 continue
 
-            rows, company_key, company_name = self._read_detail_rows(
+            content_hash = _file_sha256(detail_path)
+            duplicate_name = hashes.get(content_hash)
+            if duplicate_name:
+                warnings.append(
+                    f"Файл расшифровки {detail_path.name} пропущен: "
+                    f"его содержимое совпадает с {duplicate_name}."
+                )
+                continue
+            hashes[content_hash] = detail_path.name
+
+            rows, company_key, company_name, content_date = self._read_detail_rows(
                 detail_path,
                 detail_type,
                 should_cancel,
             )
-            batch_key = (detail_type, company_key)
+            detail_date = content_date or _detail_date_for_path(detail_path)
+            group_key = (
+                detail_date.isoformat()
+                if detail_date
+                else f"file:{detail_path.name.casefold()}"
+            )
+            batch_key = (detail_type, company_key, group_key)
             batch = batches.setdefault(
                 batch_key,
                 DetailBatch(
                     detail_type=detail_type,
                     company_key=company_key,
                     company_name=company_name,
+                    detail_date=detail_date,
                 ),
             )
             if company_name and not batch.company_name:
@@ -899,7 +929,7 @@ class NewBankStatementProcessor:
         path: Path,
         detail_type: str,
         should_cancel: Callable[[], bool] | None = None,
-    ) -> tuple[list[DetailPaymentRow], str, str]:
+    ) -> tuple[list[DetailPaymentRow], str, str, date | None]:
         raw = _read_detail_raw(path, f"расшифровку {DETAIL_TYPE_LABELS[detail_type]}")
         company_key, company_name = _company_key_from_detail(raw)
         aliases = DETAIL_ALIASES[detail_type]
@@ -913,6 +943,7 @@ class NewBankStatementProcessor:
             amount=_find_column(headers, "amount", aliases),
             iin=_find_column(headers, "iin", aliases),
             fio=_find_column(headers, "fio", aliases),
+            date=_find_column(headers, "date", aliases),
         )
         missing_required = []
         if not columns.amount:
@@ -926,6 +957,7 @@ class NewBankStatementProcessor:
             )
 
         rows: list[DetailPaymentRow] = []
+        detail_dates: set[date] = set()
         for row_index, (dataframe_index, row) in enumerate(df.iterrows()):
             if row_index % 100 == 0:
                 _check_cancelled(should_cancel)
@@ -936,6 +968,10 @@ class NewBankStatementProcessor:
             iin = _normalize_iin(row.get(columns.iin)) if columns.iin else ""
             if not iin:
                 continue
+
+            row_date = _date_value(row.get(columns.date)) if columns.date else None
+            if row_date:
+                detail_dates.add(row_date)
 
             rows.append(
                 DetailPaymentRow(
@@ -948,7 +984,8 @@ class NewBankStatementProcessor:
                 )
             )
 
-        return rows, company_key, company_name
+        content_date = next(iter(detail_dates)) if len(detail_dates) == 1 else None
+        return rows, company_key, company_name, content_date
 
     def _build_records(
         self,
@@ -1105,7 +1142,6 @@ class NewBankStatementProcessor:
                 {
                     "ДБЗ": "",
                     "ИИН": record.counterparty_iin,
-                    "ФИО (заёмщика)": "",
                     **base_row,
                     "Взыскатель": "",
                     "ФИО из выписки": "",
@@ -1123,7 +1159,6 @@ class NewBankStatementProcessor:
             {
                 "ДБЗ": "",
                 "ИИН": match.detected_iin,
-                "ФИО (заёмщика)": "",
                 **base_row,
                 "Взыскатель": "",
                 "ФИО из выписки": match.detected_name or "; ".join(record.purpose_names),
@@ -1162,7 +1197,6 @@ class NewBankStatementProcessor:
                 {
                     "ДБЗ": "",
                     "ИИН": "",
-                    "ФИО (заёмщика)": "",
                     **_base_output_row(context, statement_total),
                     "Взыскатель": "",
                     "ФИО из выписки": "",
@@ -1180,13 +1214,16 @@ class NewBankStatementProcessor:
             if row_index % 100 == 0:
                 _check_cancelled(should_cancel)
             entry, reason = _match_detail_row_by_iin(detail_row.iin, reference)
-            base_row = _base_output_row(context, detail_row.amount)
+            base_row = _base_output_row(
+                context,
+                detail_row.amount,
+                total_debt=detail_total,
+            )
             if reason == "not_found":
                 not_found_rows.append(
                     {
                         "ДБЗ": "",
                         "ИИН": detail_row.iin,
-                        "ФИО (заёмщика)": "",
                         **base_row,
                         "Взыскатель": "",
                         "ФИО из выписки": detail_row.fio,
@@ -1201,7 +1238,6 @@ class NewBankStatementProcessor:
                     {
                         "ДБЗ": "",
                         "ИИН": detail_row.iin,
-                        "ФИО (заёмщика)": "",
                         **base_row,
                         "Взыскатель": "",
                         "ФИО из выписки": detail_row.fio,
@@ -1220,7 +1256,6 @@ class NewBankStatementProcessor:
                 {
                     "ДБЗ": "",
                     "ИИН": "",
-                    "ФИО (заёмщика)": "",
                     **_base_output_row(context, _round_money(statement_total - detail_total)),
                     "Взыскатель": "",
                     "ФИО из выписки": "",
@@ -1341,6 +1376,11 @@ def _detect_detail_header_row(
 
 
 def _read_detail_raw(path: Path, label: str) -> pd.DataFrame:
+    if path.suffix.lower() == ".xls":
+        spreadsheetml_raw = _read_spreadsheetml_raw(path)
+        if spreadsheetml_raw is not None:
+            return spreadsheetml_raw
+
     raw = _read_excel_raw(path, label)
     if path.suffix.lower() not in {".xlsx", ".xlsm", ".xltx"}:
         return raw
@@ -1354,6 +1394,53 @@ def _read_detail_raw(path: Path, label: str) -> pd.DataFrame:
     raw = raw.reindex(index=range(rows), columns=range(columns))
     formula_raw = formula_raw.reindex(index=range(rows), columns=range(columns))
     return raw.combine_first(formula_raw)
+
+
+def _read_spreadsheetml_raw(path: Path) -> pd.DataFrame | None:
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (ElementTree.ParseError, OSError, UnicodeError):
+        return None
+
+    if not root.tag.endswith("}Workbook"):
+        return None
+
+    index_attribute = "{urn:schemas-microsoft-com:office:spreadsheet}Index"
+    for worksheet in root.iter():
+        if not worksheet.tag.endswith("}Worksheet"):
+            continue
+        values: list[list[Any]] = []
+        for row in worksheet.iter():
+            if not row.tag.endswith("}Row"):
+                continue
+            row_values: list[Any] = []
+            for cell in row:
+                if not cell.tag.endswith("}Cell"):
+                    continue
+                cell_index = cell.get(index_attribute)
+                if cell_index and cell_index.isdigit():
+                    while len(row_values) < int(cell_index) - 1:
+                        row_values.append(None)
+                data = next(
+                    (item for item in cell.iter() if item.tag.endswith("}Data")),
+                    None,
+                )
+                row_values.append(
+                    None if data is None else "".join(data.itertext()).strip()
+                )
+            if any(not _is_detail_empty(value) for value in row_values):
+                values.append(row_values)
+        if values:
+            return pd.DataFrame(values, dtype=object)
+    return None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read_openpyxl_formula_raw(path: Path) -> pd.DataFrame | None:
@@ -1436,6 +1523,20 @@ def _starts_with_yyyymmdd(value: str) -> bool:
     return True
 
 
+def _detail_date_for_path(path: Path) -> date | None:
+    for value in re.findall(r"20\d{6}", path.stem):
+        try:
+            return datetime.strptime(value, "%Y%m%d").date()
+        except ValueError:
+            continue
+    for value in re.findall(r"(?<!\d)(\d{6})(?!\d)", path.stem):
+        try:
+            return datetime.strptime(value, "%d%m%y").date()
+        except ValueError:
+            continue
+    return None
+
+
 def _detail_type_for_record(record: NewPaymentRecord) -> str:
     sender = _compact_text(record.sender)
     purpose = _clean_cell(record.purpose).lower()
@@ -1450,24 +1551,114 @@ def _detail_type_for_record(record: NewPaymentRecord) -> str:
     return ""
 
 
-def _detail_batch_key_for_record(
+def _detail_batch_keys_for_record(
     record: NewPaymentRecord,
     detail_type: str,
-    detail_batches: dict[tuple[str, str], DetailBatch],
-) -> tuple[str, str] | None:
+    detail_batches: dict[tuple[str, str, str], DetailBatch],
+) -> list[tuple[str, str, str]]:
     if not detail_type:
-        return None
+        return []
 
     statement_company_key, _ = _company_key_from_statement(record)
-    exact_key = (detail_type, statement_company_key)
-    if statement_company_key and exact_key in detail_batches:
-        return exact_key
+    type_keys = [
+        key
+        for key, batch in detail_batches.items()
+        if batch.detail_type == detail_type
+    ]
+    if statement_company_key:
+        exact_keys = [
+            key
+            for key in type_keys
+            if detail_batches[key].company_key == statement_company_key
+        ]
+        if exact_keys:
+            return exact_keys
 
-    fallback_key = (detail_type, "")
-    if fallback_key in detail_batches:
-        return fallback_key
+    return [key for key in type_keys if not detail_batches[key].company_key]
 
-    return None
+
+def _route_detail_records(
+    records: list[NewPaymentRecord],
+    detail_batches: dict[tuple[str, str, str], DetailBatch],
+) -> tuple[
+    dict[tuple[str, str, str], list[NewPaymentRecord]],
+    list[NewPaymentRecord],
+]:
+    routed: dict[tuple[str, str, str], list[NewPaymentRecord]] = {}
+    normal_records: list[NewPaymentRecord] = []
+    candidates: dict[int, list[tuple[str, str, str]]] = {}
+
+    for index, record in enumerate(records):
+        detail_type = _detail_type_for_record(record)
+        record_candidates = _detail_batch_keys_for_record(
+            record,
+            detail_type,
+            detail_batches,
+        )
+        if record_candidates:
+            candidates[index] = record_candidates
+        else:
+            normal_records.append(record)
+
+    assigned_records: set[int] = set()
+    used_undated_batches: set[tuple[str, str, str]] = set()
+
+    for index, record_candidates in candidates.items():
+        record_date = _date_value(records[index].date)
+        dated_matches = [
+            key
+            for key in record_candidates
+            if detail_batches[key].detail_date == record_date
+        ]
+        if record_date and len(dated_matches) == 1:
+            routed.setdefault(dated_matches[0], []).append(records[index])
+            assigned_records.add(index)
+
+    for index, record_candidates in candidates.items():
+        if index in assigned_records:
+            continue
+        amount_matches = [
+            key
+            for key in record_candidates
+            if detail_batches[key].detail_date is None
+            and key not in used_undated_batches
+            and abs(detail_batches[key].total_amount - records[index].amount)
+            <= MONEY_TOLERANCE
+        ]
+        if len(amount_matches) == 1:
+            key = amount_matches[0]
+            routed.setdefault(key, []).append(records[index])
+            assigned_records.add(index)
+            used_undated_batches.add(key)
+
+    for index, record_candidates in candidates.items():
+        if index in assigned_records:
+            continue
+        remaining = [
+            key
+            for key in record_candidates
+            if detail_batches[key].detail_date is None
+            and key not in used_undated_batches
+        ]
+        if remaining:
+            key = remaining[0]
+            routed.setdefault(key, []).append(records[index])
+            used_undated_batches.add(key)
+        else:
+            normal_records.append(records[index])
+
+    return routed, normal_records
+
+
+def _date_value(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    parsed = _parse_date(value)
+    if isinstance(parsed, datetime):
+        return parsed.date()
+    return parsed if isinstance(parsed, date) else None
 
 
 def _detail_iin_column_label(detail_type: str) -> str:
@@ -1576,8 +1767,13 @@ def _skipped_statement_row(
     }
 
 
-def _base_output_row(record: NewPaymentRecord, amount: float) -> dict[str, Any]:
+def _base_output_row(
+    record: NewPaymentRecord,
+    amount: float,
+    total_debt: float | str = "",
+) -> dict[str, Any]:
     return {
+        "Общая задолженность": total_debt,
         "Дата": record.date,
         "Отправитель": record.sender,
         "Сумма": amount,
@@ -1595,7 +1791,6 @@ def _matched_output_row(
     return {
         "ДБЗ": entry.dbz,
         "ИИН": entry.iin,
-        "ФИО (заёмщика)": _clean_output_fio(entry.fio),
         **base_row,
         "Взыскатель": entry.creditor,
     }

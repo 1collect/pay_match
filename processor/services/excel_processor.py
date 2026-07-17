@@ -965,7 +965,7 @@ def _parse_date(value: Any) -> date | None:
         if pd.isna(parsed):
             return None
         return parsed.date()
-    if re.match(r"^\d{4}-\d{2}-\d{2}T", text):
+    if re.match(r"^\d{4}-\d{2}-\d{2}(?:T|\s)", text):
         parsed = pd.to_datetime(text, dayfirst=False, errors="coerce")
         if pd.isna(parsed):
             return None
@@ -1038,7 +1038,10 @@ def _format_workbook(workbook) -> None:
             column_letter = get_column_letter(column_cells[0].column)
             header = str(worksheet.cell(1, column_cells[0].column).value or "")
             is_date_column = "Дата" in header
-            is_amount_column = "Сумма" in header
+            is_amount_column = (
+                "Сумма" in header
+                or "задолженность" in header.lower()
+            )
             for cell in column_cells:
                 value = cell.value
                 if value is None:
