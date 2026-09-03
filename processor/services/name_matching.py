@@ -235,15 +235,6 @@ def _find_distinct_token_assignment(
 def _person_tokens_match(reference: str, detected: str) -> bool:
     if len(detected) == 1:
         return reference.startswith(detected)
-    if reference == detected:
-        return True
-    if min(len(reference), len(detected)) < 5 or abs(len(reference) - len(detected)) > 3:
-        return False
-    common = 0
-    for left, right in zip(reference, detected):
-        if left != right:
-            break
-        common += 1
-    # Allows common Russian grammatical endings only when almost the whole
-    # token agrees; this is intentionally stricter than general fuzzy search.
-    return common >= 3 and common >= min(len(reference), len(detected)) - 2
+    # Full name parts must match exactly. Grammatical endings are handled by
+    # the separate nominative-form retry, not by fuzzy prefix comparison.
+    return reference == detected

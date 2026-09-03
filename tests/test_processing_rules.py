@@ -540,12 +540,89 @@ class ProcessingRuleTests(unittest.TestCase):
             workbook.close()
 
     def test_name_matching_allows_safe_grammatical_endings(self) -> None:
-        self.assertIsNotNone(
+        reference_name = "Нуриева Сания Ирлановна"
+        declined_name = "Нуриевой Сании Ирлановны"
+        self.assertIsNone(
             match_person_name(
-                "Нуриева Сания Ирлановна",
-                "Нуриевой Сании Ирлановны",
+                reference_name,
+                declined_name,
             )
         )
+        self.assertIsNotNone(
+            match_person_name_nominative(reference_name, declined_name)
+        )
+
+    def test_name_matching_rejects_different_names_with_shared_prefix(self) -> None:
+        self.assertIsNone(
+            match_person_name(
+                "Сайдалин Самарбай Муратович",
+                "Сайдалин Самат Муратович",
+            )
+        )
+        self.assertIsNone(
+            match_person_name_nominative(
+                "Сайдалин Самарбай Муратович",
+                "Сайдалин Самат Муратович",
+            )
+        )
+
+    def test_sender_iin_is_rejected_when_sender_name_conflicts(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            statement = root / "statement.xlsx"
+            reference = root / "reference.xlsx"
+            output = root / "output"
+            sender = "Сайдалин Самат Муратович"
+
+            statement_book = Workbook()
+            statement_sheet = statement_book.active
+            statement_sheet.append(
+                [
+                    "Дата",
+                    "Отправитель",
+                    "БИН/ИИН контрагента",
+                    "Кредит",
+                    "Назначение платежа",
+                ]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    sender,
+                    "820523351247",
+                    50000,
+                    "Погашение долгосрочного займа",
+                ]
+            )
+            statement_book.save(statement)
+
+            reference_book = Workbook()
+            reference_sheet = reference_book.active
+            reference_sheet.append(["Взыскатель", "ДБЗ", "ИИН", "ФИО"])
+            reference_sheet.append(
+                [
+                    "Компания",
+                    "100000315334/B",
+                    "820523351247",
+                    "Сайдалин Самарбай Муратович",
+                ]
+            )
+            reference_book.save(reference)
+
+            result = NewBankStatementProcessor(
+                FakeNameExtractor({sender: (sender,)})
+            ).process_many(
+                statement_paths=[statement],
+                reference_path=reference,
+                output_dir=output,
+            )
+
+            workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
+            self.assertEqual(workbook["Оплата"].max_row - 1, 0)
+            self.assertEqual(workbook["Не найдено"].max_row - 1, 1)
+            reason = workbook["Не найдено"][2][13].value
+            self.assertIn("ФИО не совпадает", reason)
+            workbook.close()
 
     def test_name_matching_retries_in_nominative_case(self) -> None:
         reference_name = "Петров Пётр Петрович"

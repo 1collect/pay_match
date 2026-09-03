@@ -1915,6 +1915,39 @@ def _find_in_new_text(
                 candidate.name_strength = max(candidate.name_strength, evidence.strength)
 
     valid_candidates = list(candidates.values())
+    identifier_candidates = [
+        candidate
+        for candidate in valid_candidates
+        if {"ИИН", "ДБЗ"} & candidate.criteria
+    ]
+    if (
+        source == "Отправитель"
+        and detected_names
+        and identifier_candidates
+        and not any(candidate.name_strength for candidate in identifier_candidates)
+    ):
+        return NewMatch(
+            entry=None,
+            detected_iin="; ".join(
+                dict.fromkeys(
+                    candidate.detected_iin
+                    for candidate in identifier_candidates
+                    if candidate.detected_iin
+                )
+            ),
+            detected_name="; ".join(detected_names),
+            criteria=tuple(
+                sorted(
+                    {
+                        criterion
+                        for candidate in identifier_candidates
+                        for criterion in candidate.criteria
+                    }
+                )
+            ),
+            reason="ИИН/ДБЗ отправителя найден в справочнике, но ФИО не совпадает",
+            source=source,
+        )
     if source == "Назначение платежа" and _distinct_borrower_count(valid_candidates) > 1:
         return NewMatch(
             entry=None,
@@ -2128,6 +2161,7 @@ def _is_blocking_new_match(match: NewMatch) -> bool:
         or "переплат" in lowered_reason
         or "несколько дбз" in lowered_reason
         or "не указан остаток задолженности" in lowered_reason
+        or "фио не совпадает" in lowered_reason
     )
 
 
