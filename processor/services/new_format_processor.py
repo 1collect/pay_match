@@ -1099,7 +1099,12 @@ class NewBankStatementProcessor:
             # made on behalf of a debtor to the payer instead.
             return purpose_match
 
-        sender_text = "\n".join(part for part in (record.counterparty_iin, record.sender) if part)
+        counterparty_iin = (
+            "" if _is_chsi_sender(record.sender) else record.counterparty_iin
+        )
+        sender_text = "\n".join(
+            part for part in (counterparty_iin, record.sender) if part
+        )
         sender_names = (
             record.sender_names
             if record.payment_method == "Физическое лицо" and not _is_chsi_sender(record.sender)
@@ -1116,7 +1121,9 @@ class NewBankStatementProcessor:
             return sender_match
 
         combined_text = "\n".join(
-            part for part in (record.counterparty_iin, record.purpose, record.sender) if part
+            part
+            for part in (record.purpose, counterparty_iin, record.sender)
+            if part
         )
         return _find_in_new_text(
             record,
@@ -1858,7 +1865,7 @@ def _find_in_new_text(
     source: str,
     detected_names: tuple[str, ...] = (),
 ) -> NewMatch:
-    search_text = "\n".join(part for part in (record.counterparty_iin, text) if part)
+    search_text = text or ""
     candidates: dict[int, NewCandidate] = {}
 
     for iin in _extract_iins(search_text):
@@ -1871,26 +1878,29 @@ def _find_in_new_text(
         for entry in reference.by_dbz.get(dbz_key, []):
             _new_candidate_for(candidates, entry).criteria.add("ДБЗ")
 
-    direct_name_match_found = False
+    names_without_direct_match: list[str] = []
     for detected_name in detected_names:
         name_entries: dict[int, NewReferenceEntry] = {}
         for lookup_key in name_lookup_keys(detected_name):
             for entry in reference.by_name_token.get(lookup_key, []):
                 name_entries[entry.row_id] = entry
+        detected_name_matched = False
         for entry in name_entries.values():
             evidence = match_person_name(entry.fio, detected_name)
             if not evidence:
                 continue
-            direct_name_match_found = True
+            detected_name_matched = True
             candidate = _new_candidate_for(candidates, entry)
             candidate.criteria.add(evidence.criterion)
             candidate.detected_name = detected_name
             candidate.name_strength = max(candidate.name_strength, evidence.strength)
+        if not detected_name_matched:
+            names_without_direct_match.append(detected_name)
 
-    # Preserve the current matching order. Only if none of the original GLiNER
-    # name variants matched, remove grammatical case endings and try once more.
-    if detected_names and not direct_name_match_found:
-        for detected_name in detected_names:
+    # Preserve the direct-match priority for each GLiNER result. For every name
+    # that did not match as written, remove grammatical endings and retry it.
+    if names_without_direct_match:
+        for detected_name in names_without_direct_match:
             name_entries = {}
             for lookup_key in nominative_name_lookup_keys(detected_name):
                 for entry in reference.by_name_token.get(lookup_key, []):
@@ -1905,6 +1915,29 @@ def _find_in_new_text(
                 candidate.name_strength = max(candidate.name_strength, evidence.strength)
 
     valid_candidates = list(candidates.values())
+    if source == "Назначение платежа" and _distinct_borrower_count(valid_candidates) > 1:
+        return NewMatch(
+            entry=None,
+            detected_iin="; ".join(
+                dict.fromkeys(
+                    candidate.detected_iin
+                    for candidate in valid_candidates
+                    if candidate.detected_iin
+                )
+            ),
+            detected_name="; ".join(detected_names),
+            criteria=tuple(
+                sorted(
+                    {
+                        criterion
+                        for candidate in valid_candidates
+                        for criterion in candidate.criteria
+                    }
+                )
+            ),
+            reason="В назначении платежа найдено несколько должников в справочнике",
+            source=source,
+        )
     if not valid_candidates:
         reason = (
             "ФИО, извлеченное GLiNER 2, не найдено в справочнике по безопасным правилам"
@@ -2042,6 +2075,16 @@ def _new_candidate_for(
     if entry.row_id not in candidates:
         candidates[entry.row_id] = NewCandidate(entry=entry)
     return candidates[entry.row_id]
+
+
+def _distinct_borrower_count(candidates: list[NewCandidate]) -> int:
+    identities = {
+        ("iin", candidate.entry.iin)
+        if candidate.entry.iin
+        else ("reference_row", str(candidate.entry.row_id))
+        for candidate in candidates
+    }
+    return len(identities)
 
 
 def _best_new_candidate(candidates: Any) -> NewCandidate | None:

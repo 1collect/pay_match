@@ -372,6 +372,173 @@ class ProcessingRuleTests(unittest.TestCase):
                     match_person_name("Иванов Иван Иванович", detected)
                 )
 
+    def test_multiple_borrowers_in_purpose_are_sent_to_not_found(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            statement = root / "statement.xlsx"
+            reference = root / "reference.xlsx"
+            output = root / "output"
+            purpose = (
+                "Должники: Иванов Иван Иванович и Петров Петр Петрович "
+                "ИИН 900101300001"
+            )
+
+            statement_book = Workbook()
+            statement_sheet = statement_book.active
+            statement_sheet.append(["Дата", "Отправитель", "Кредит", "Назначение платежа"])
+            statement_sheet.append(["15.07.2026", "Плательщик", 1000, purpose])
+            statement_book.save(statement)
+
+            reference_book = Workbook()
+            reference_sheet = reference_book.active
+            reference_sheet.append(["Взыскатель", "ДБЗ", "ИИН", "ФИО"])
+            reference_sheet.append(
+                ["Компания", "DBZ-1", "900101300001", "Иванов Иван Иванович"]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-2", "900101300002", "Петров Петр Петрович"]
+            )
+            reference_book.save(reference)
+
+            extractor = FakeNameExtractor(
+                {
+                    purpose: (
+                        "Иванов Иван Иванович",
+                        "Петров Петр Петрович",
+                    )
+                }
+            )
+            result = NewBankStatementProcessor(extractor).process_many(
+                statement_paths=[statement],
+                reference_path=reference,
+                output_dir=output,
+            )
+
+            workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
+            self.assertEqual(workbook["Оплата"].max_row - 1, 0)
+            self.assertEqual(workbook["Не найдено"].max_row - 1, 1)
+            reason = workbook["Не найдено"][2][13].value
+            self.assertIn("найдено несколько должников", reason.lower())
+            workbook.close()
+
+    def test_chsi_counterparty_iin_is_not_used_as_debtor_iin(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            statement = root / "statement.xlsx"
+            reference = root / "reference.xlsx"
+            output = root / "output"
+
+            statement_book = Workbook()
+            statement_sheet = statement_book.active
+            statement_sheet.append(
+                [
+                    "Дата",
+                    "Отправитель",
+                    "БИН/ИИН контрагента",
+                    "Кредит",
+                    "Назначение платежа",
+                ]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    "ЧСИ Талипов Нурмуханович",
+                    "661201300130",
+                    1000,
+                    "Взыскано с должника Хайруллина О.С. ИИН 800908402859",
+                ]
+            )
+            statement_book.save(statement)
+
+            reference_book = Workbook()
+            reference_sheet = reference_book.active
+            reference_sheet.append(["Взыскатель", "ДБЗ", "ИИН", "ФИО"])
+            reference_sheet.append(
+                ["Компания", "DBZ-CHSI", "661201300130", "Талипов Нурмухан"]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-DEBTOR", "800908402859", "Хайруллина Ольга"]
+            )
+            reference_book.save(reference)
+
+            result = NewBankStatementProcessor(FakeNameExtractor({})).process_many(
+                statement_paths=[statement],
+                reference_path=reference,
+                output_dir=output,
+            )
+
+            workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
+            self.assertEqual(workbook["Оплата"].max_row - 1, 1)
+            headers = [cell.value for cell in workbook["Оплата"][1]]
+            payment = dict(
+                zip(
+                    headers,
+                    next(workbook["Оплата"].iter_rows(min_row=2, values_only=True)),
+                )
+            )
+            self.assertEqual(payment["ИИН"], "800908402859")
+            self.assertEqual(payment["ДБЗ"], "DBZ-DEBTOR")
+            self.assertEqual(payment["Оплата через"], "ЧСИ")
+            workbook.close()
+
+    def test_purpose_iin_has_priority_over_counterparty_iin(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            statement = root / "statement.xlsx"
+            reference = root / "reference.xlsx"
+            output = root / "output"
+
+            statement_book = Workbook()
+            statement_sheet = statement_book.active
+            statement_sheet.append(
+                [
+                    "Дата",
+                    "Отправитель",
+                    "БИН/ИИН контрагента",
+                    "Кредит",
+                    "Назначение платежа",
+                ]
+            )
+            statement_sheet.append(
+                [
+                    "15.07.2026",
+                    "Плательщик",
+                    "661201300130",
+                    1000,
+                    "Оплата долга, ИИН должника 800908402859",
+                ]
+            )
+            statement_book.save(statement)
+
+            reference_book = Workbook()
+            reference_sheet = reference_book.active
+            reference_sheet.append(["Взыскатель", "ДБЗ", "ИИН", "ФИО"])
+            reference_sheet.append(
+                ["Компания", "DBZ-COUNTERPARTY", "661201300130", "Иванов Иван"]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-PURPOSE", "800908402859", "Петров Петр"]
+            )
+            reference_book.save(reference)
+
+            result = NewBankStatementProcessor(FakeNameExtractor({})).process_many(
+                statement_paths=[statement],
+                reference_path=reference,
+                output_dir=output,
+            )
+
+            workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
+            headers = [cell.value for cell in workbook["Оплата"][1]]
+            payment = dict(
+                zip(
+                    headers,
+                    next(workbook["Оплата"].iter_rows(min_row=2, values_only=True)),
+                )
+            )
+            self.assertEqual(payment["ИИН"], "800908402859")
+            self.assertEqual(payment["ДБЗ"], "DBZ-PURPOSE")
+            workbook.close()
+
     def test_name_matching_allows_safe_grammatical_endings(self) -> None:
         self.assertIsNotNone(
             match_person_name(
