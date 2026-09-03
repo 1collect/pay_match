@@ -303,20 +303,26 @@ class ProcessingRuleTests(unittest.TestCase):
                 dict(zip(payment_headers, row))
                 for row in workbook["Оплата"].iter_rows(min_row=2, values_only=True)
             ]
-            self.assertEqual(len(payment_rows), 1)
-            self.assertEqual(payment_rows[0]["ДБЗ"], "DBZ-2")
+            self.assertEqual(len(payment_rows), 0)
 
             not_found_headers = [cell.value for cell in workbook["Не найдено"][1]]
             not_found_rows = [
                 dict(zip(not_found_headers, row))
                 for row in workbook["Не найдено"].iter_rows(min_row=2, values_only=True)
             ]
-            self.assertEqual(len(not_found_rows), 4)
+            self.assertEqual(len(not_found_rows), 5)
             reasons = [row["Причина"].lower() for row in not_found_rows]
             self.assertEqual(sum("переплат" in reason for reason in reasons), 1)
             self.assertEqual(
                 sum("два или более дбз" in reason for reason in reasons),
-                2,
+                3,
+            )
+            self.assertEqual(
+                sum(
+                    "в назначении платежа найдено два или более дбз" in reason
+                    for reason in reasons
+                ),
+                1,
             )
             self.assertEqual(
                 sum("не указан остаток задолженности" in reason for reason in reasons),

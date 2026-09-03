@@ -1867,6 +1867,7 @@ def _find_in_new_text(
 ) -> NewMatch:
     search_text = text or ""
     candidates: dict[int, NewCandidate] = {}
+    matched_dbz_keys: set[str] = set()
 
     for iin in _extract_iins(search_text):
         for entry in reference.by_iin.get(iin, []):
@@ -1875,7 +1876,10 @@ def _find_in_new_text(
             candidate.detected_iin = iin
 
     for dbz_key in _extract_dbz_keys(search_text):
-        for entry in reference.by_dbz.get(dbz_key, []):
+        entries = reference.by_dbz.get(dbz_key, [])
+        if entries:
+            matched_dbz_keys.add(dbz_key)
+        for entry in entries:
             _new_candidate_for(candidates, entry).criteria.add("ДБЗ")
 
     names_without_direct_match: list[str] = []
@@ -1915,6 +1919,29 @@ def _find_in_new_text(
                 candidate.name_strength = max(candidate.name_strength, evidence.strength)
 
     valid_candidates = list(candidates.values())
+    if source == "Назначение платежа" and len(matched_dbz_keys) > 1:
+        return NewMatch(
+            entry=None,
+            detected_iin="; ".join(
+                dict.fromkeys(
+                    candidate.detected_iin
+                    for candidate in valid_candidates
+                    if candidate.detected_iin
+                )
+            ),
+            detected_name="; ".join(detected_names),
+            criteria=tuple(
+                sorted(
+                    {
+                        criterion
+                        for candidate in valid_candidates
+                        for criterion in candidate.criteria
+                    }
+                )
+            ),
+            reason="В назначении платежа найдено два или более ДБЗ",
+            source=source,
+        )
     identifier_candidates = [
         candidate
         for candidate in valid_candidates
