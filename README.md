@@ -44,7 +44,7 @@ MAX_UPLOAD_MB=200 python app.py
 PROCESSING_WORKERS=4
 RESULT_TTL_MINUTES=30
 NER_MODEL=fastino/gliner2-multi-v1
-NER_BATCH_SIZE=8
+NER_BATCH_SIZE=64
 ```
 
 Сопоставление ФИО нечувствительно к регистру и порядку частей имени. Поддерживаются

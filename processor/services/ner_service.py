@@ -31,7 +31,7 @@ _inference_lock = threading.Lock()
 class PersonNameExtractor:
     def __init__(self, model_name: str | None = None, batch_size: int | None = None) -> None:
         self.model_name = model_name or os.getenv("NER_MODEL", DEFAULT_MODEL)
-        self.batch_size = batch_size or int(os.getenv("NER_BATCH_SIZE", "8"))
+        self.batch_size = batch_size or int(os.getenv("NER_BATCH_SIZE", "64"))
 
     def extract_many(
         self,
