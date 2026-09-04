@@ -7,6 +7,7 @@ from openpyxl import Workbook, load_workbook
 
 from processor.services.excel_processor import (
     _contains_excluded_keyword,
+    _extract_dbz_keys,
     _normalize_identifier,
     _parse_date,
 )
@@ -39,6 +40,16 @@ class FakeNameExtractor:
 
 
 class ProcessingRuleTests(unittest.TestCase):
+    def test_dbz_number_accepts_one_or_two_accidental_spaces(self) -> None:
+        cases = {
+            "Оплата по ДБЗ: ABC12 345": "ABC12345",
+            "Оплата по ДБЗ: ABC12  345": "ABC12345",
+            "Оплата, договор займа № ABC 12 345": "ABC12345",
+        }
+        for purpose, expected in cases.items():
+            with self.subTest(purpose=purpose):
+                self.assertIn(expected, _extract_dbz_keys(purpose))
+
     def test_iso_datetime_with_space_keeps_month_and_day(self) -> None:
         self.assertEqual(str(_parse_date("2026-07-10 00:00:00.0")), "2026-07-10")
 

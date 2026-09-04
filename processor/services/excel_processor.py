@@ -640,6 +640,29 @@ def _extract_dbz_keys(value: str) -> list[str]:
         if key:
             keys.append(key)
 
+        # A document number is occasionally typed with one or two accidental
+        # spaces inside it. Add joined variants of the chunks immediately after
+        # the first one; only a variant equal to a DBZ from the reference book
+        # will be used by the matcher.
+        joined_value = match.group(1)
+        cursor = match.end(1)
+        spaces_used = 0
+        while spaces_used < 2:
+            continuation = re.match(
+                r"([ \t\u00a0]{1,2})([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9/_-]{0,60})",
+                text[cursor:],
+            )
+            if not continuation:
+                break
+            spaces_used += len(continuation.group(1))
+            if spaces_used > 2:
+                break
+            joined_value += continuation.group(2)
+            joined_key = _normalize_identifier(joined_value)
+            if joined_key:
+                keys.append(joined_key)
+            cursor += continuation.end()
+
     for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9/_-]{4,60}", text):
         key = _normalize_identifier(token)
         if key and not key.isdigit():
