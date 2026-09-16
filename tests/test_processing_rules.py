@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from processor.services.excel_processor import (
     _contains_excluded_keyword,
     _extract_dbz_keys,
+    _find_column,
     _normalize_identifier,
     _parse_date,
 )
@@ -18,6 +19,7 @@ from processor.services.name_matching import (
 )
 from processor.services.ner_service import NameExtraction
 from processor.services.new_format_processor import (
+    NEW_STATEMENT_ALIASES,
     NewBankStatementProcessor,
     ProcessingCancelled,
     _detail_date_for_path,
@@ -40,6 +42,14 @@ class FakeNameExtractor:
 
 
 class ProcessingRuleTests(unittest.TestCase):
+    def test_new_statement_accepts_correspondent_as_sender(self) -> None:
+        for header in ("Корреспондент", "Кореспондент"):
+            with self.subTest(header=header):
+                self.assertEqual(
+                    _find_column([header], "sender", NEW_STATEMENT_ALIASES),
+                    header,
+                )
+
     def test_dbz_number_accepts_one_or_two_accidental_spaces(self) -> None:
         cases = {
             "Оплата по ДБЗ: ABC12 345": "ABC12345",
