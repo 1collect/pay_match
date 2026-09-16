@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -477,6 +479,11 @@ class NewReferenceBook:
         return len(self.entries)
 
 
+_REFERENCE_CACHE_MAX_SIZE = 1
+_reference_cache: OrderedDict[str, NewReferenceBook] = OrderedDict()
+_reference_cache_lock = threading.Lock()
+
+
 @dataclass
 class DetailColumns:
     amount: str | None = None
@@ -745,15 +752,16 @@ class NewBankStatementProcessor:
     ) -> None:
         if not records:
             return
+        unique_texts = list(
+            dict.fromkeys(
+                text
+                for record in records
+                for text in (record.purpose, record.sender)
+                if text
+            )
+        )
         try:
-            purpose_results = self.name_extractor.extract_many(
-                [record.purpose for record in records],
-                should_cancel,
-            )
-            sender_results = self.name_extractor.extract_many(
-                [record.sender for record in records],
-                should_cancel,
-            )
+            extracted = self.name_extractor.extract_many(unique_texts, should_cancel)
         except InterruptedError as exc:
             raise ProcessingCancelled("Операция отменена") from exc
         except Exception as exc:
@@ -762,22 +770,48 @@ class NewBankStatementProcessor:
                 "Проверьте доступность модели и повторите операцию."
             ) from exc
 
-        for record, purpose_result, sender_result in zip(
-            records,
-            purpose_results,
-            sender_results,
-            strict=True,
-        ):
-            record.purpose_names = purpose_result.names
-            record.sender_names = sender_result.names
+        results_by_text = dict(zip(unique_texts, extracted, strict=True))
+        empty_reason = "GLiNER 2 не обнаружил допустимое ФИО"
+        for record in records:
+            purpose_result = results_by_text.get(record.purpose)
+            sender_result = results_by_text.get(record.sender)
+            record.purpose_names = purpose_result.names if purpose_result else ()
+            record.sender_names = sender_result.names if sender_result else ()
             reasons = [
                 reason
-                for reason in (purpose_result.reason, sender_result.reason)
+                for reason in (
+                    purpose_result.reason if purpose_result else empty_reason,
+                    sender_result.reason if sender_result else empty_reason,
+                )
                 if reason
             ]
             record.ner_reason = "; ".join(dict.fromkeys(reasons))
 
     def _read_reference(
+        self,
+        path: Path,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> NewReferenceBook:
+        _check_cancelled(should_cancel)
+        cache_key = _file_sha256(path)
+        while not _reference_cache_lock.acquire(timeout=0.1):
+            _check_cancelled(should_cancel)
+        try:
+            cached = _reference_cache.get(cache_key)
+            if cached is not None:
+                _reference_cache.move_to_end(cache_key)
+                return cached
+
+            reference = self._read_reference_uncached(path, should_cancel)
+            _reference_cache[cache_key] = reference
+            _reference_cache.move_to_end(cache_key)
+            while len(_reference_cache) > _REFERENCE_CACHE_MAX_SIZE:
+                _reference_cache.popitem(last=False)
+            return reference
+        finally:
+            _reference_cache_lock.release()
+
+    def _read_reference_uncached(
         self,
         path: Path,
         should_cancel: Callable[[], bool] | None = None,
@@ -1161,6 +1195,7 @@ class NewBankStatementProcessor:
             return
 
         if match.entry:
+            base_row["Общая задолженность"] = match.entry.debt_balance
             matched_rows.append(_matched_output_row(match.entry, base_row))
             return
 

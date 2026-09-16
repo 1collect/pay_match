@@ -46,7 +46,7 @@ def _morph_analyzer() -> pymorphy3.MorphAnalyzer:
     return pymorphy3.MorphAnalyzer()
 
 
-@lru_cache(maxsize=20_000)
+@lru_cache(maxsize=200_000)
 def _nominative_person_token(token: str, preserve_feminine_name: bool) -> str:
     if len(token) <= 1 or not re.fullmatch(NAME_TOKEN_PATTERN, token):
         return token

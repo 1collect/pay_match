@@ -30,8 +30,10 @@ from processor.services.new_format_processor import (
 class FakeNameExtractor:
     def __init__(self, names_by_text: dict[str, tuple[str, ...]]) -> None:
         self.names_by_text = names_by_text
+        self.calls: list[list[str]] = []
 
     def extract_many(self, texts, should_cancel=None):
+        self.calls.append(list(texts))
         return [
             NameExtraction(
                 self.names_by_text.get(text, ()),
@@ -479,12 +481,14 @@ class ProcessingRuleTests(unittest.TestCase):
 
             reference_book = Workbook()
             reference_sheet = reference_book.active
-            reference_sheet.append(["Взыскатель", "ДБЗ", "ИИН", "ФИО"])
             reference_sheet.append(
-                ["Компания", "DBZ-CHSI", "661201300130", "Талипов Нурмухан"]
+                ["Взыскатель", "ДБЗ", "ИИН", "ФИО", "Остаток долга"]
             )
             reference_sheet.append(
-                ["Компания", "DBZ-DEBTOR", "800908402859", "Хайруллина Ольга"]
+                ["Компания", "DBZ-CHSI", "661201300130", "Талипов Нурмухан", 5000]
+            )
+            reference_sheet.append(
+                ["Компания", "DBZ-DEBTOR", "800908402859", "Хайруллина Ольга", 2500]
             )
             reference_book.save(reference)
 
@@ -505,6 +509,7 @@ class ProcessingRuleTests(unittest.TestCase):
             )
             self.assertEqual(payment["ИИН"], "800908402859")
             self.assertEqual(payment["ДБЗ"], "DBZ-DEBTOR")
+            self.assertEqual(payment["Общая задолженность"], 2500)
             self.assertEqual(payment["Оплата через"], "ЧСИ")
             workbook.close()
 
@@ -740,6 +745,16 @@ class ProcessingRuleTests(unittest.TestCase):
                 statement_paths=[statement],
                 reference_path=reference,
                 output_dir=output,
+            )
+
+            self.assertEqual(len(extractor.calls), 1)
+            self.assertEqual(
+                extractor.calls[0],
+                [
+                    "Оплата Иван Иванович Иванов",
+                    "Плательщик",
+                    "Оплата Иванов",
+                ],
             )
 
             workbook = load_workbook(result.registry_path, read_only=True, data_only=True)
