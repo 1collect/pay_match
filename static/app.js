@@ -69,6 +69,22 @@
     let uploadController = null;
     let resultUrl = null;
     let resultLoading = false;
+    let serverProgress = 0;
+    let displayedProgress = 0;
+    let progressFrame = null;
+    let progressFrameTime = null;
+    let processingStartedAt = null;
+    let lastRenderedPercent = -1;
+    let playfulMessageIndex = -1;
+
+    const playfulMessages = [
+        "Разминаем формулы",
+        "Уговариваем Excel не чудить",
+        "Сверяем дебет с суровой реальностью",
+        "Ищем те самые две копейки",
+        "Делаем вид, что это очень сложно",
+        "Наводим финальный лоск",
+    ];
 
     const renderTime = () => {
         if (!startedAt) return;
@@ -90,6 +106,100 @@
         timerId = null;
     };
 
+    const fakeProgressFor = (elapsed) => {
+        if (elapsed < 1600) return 4 + (elapsed / 1600) * 12;
+        if (elapsed < 5200) return 16 + ((elapsed - 1600) / 3600) * 25;
+        if (elapsed < 11000) return 41 + ((elapsed - 5200) / 5800) * 25;
+        if (elapsed < 21000) return 66 + ((elapsed - 11000) / 10000) * 17;
+        return 83 + 11 * (1 - Math.exp(-(elapsed - 21000) / 18000));
+    };
+
+    const renderDisplayedProgress = () => {
+        progress.value = displayedProgress;
+        progress.textContent = `${Math.round(displayedProgress)}%`;
+        const rounded = Math.round(displayedProgress);
+        if (rounded !== lastRenderedPercent) {
+            percent.value = String(rounded);
+            percent.textContent = String(rounded);
+            lastRenderedPercent = rounded;
+        }
+    };
+
+    const animateProgress = (now) => {
+        if (!status.classList.contains("is-visible")) {
+            progressFrame = null;
+            progressFrameTime = null;
+            return;
+        }
+
+        const elapsed = now - processingStartedAt;
+        const fakeTarget = fakeProgressFor(elapsed);
+        const target = Math.min(99, Math.max(serverProgress, fakeTarget));
+        const delta = Math.min(50, now - (progressFrameTime || now));
+        const ease = 1 - Math.exp(-delta / 520);
+        displayedProgress += (target - displayedProgress) * ease;
+
+        if (target - displayedProgress < 0.025) displayedProgress = target;
+        renderDisplayedProgress();
+
+        const messageIndex = Math.min(playfulMessages.length - 1, Math.floor(elapsed / 3300));
+        if (currentStatus !== "cancelling" && messageIndex !== playfulMessageIndex) {
+            playfulMessageIndex = messageIndex;
+            processingMessage.textContent = playfulMessages[messageIndex];
+            processingMessage.animate(
+                [
+                    { opacity: 0.25, transform: "translateY(3px)" },
+                    { opacity: 1, transform: "translateY(0)" },
+                ],
+                { duration: 380, easing: "cubic-bezier(.2,.8,.2,1)" }
+            );
+        }
+        progressFrameTime = now;
+        progressFrame = window.requestAnimationFrame(animateProgress);
+    };
+
+    const startProgressAnimation = () => {
+        if (!processingStartedAt) processingStartedAt = performance.now();
+        if (!progressFrame) progressFrame = window.requestAnimationFrame(animateProgress);
+    };
+
+    const stopProgressAnimation = () => {
+        if (progressFrame) window.cancelAnimationFrame(progressFrame);
+        progressFrame = null;
+        progressFrameTime = null;
+    };
+
+    const completeProgress = (message) => new Promise((resolve) => {
+        stopProgressAnimation();
+        serverProgress = 100;
+        processingMessage.textContent = message || "Готово. Excel выжил";
+
+        if (
+            !status.classList.contains("is-visible") ||
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ) {
+            displayedProgress = 100;
+            renderDisplayedProgress();
+            resolve();
+            return;
+        }
+
+        const from = displayedProgress;
+        const started = performance.now();
+        const finishFrame = (now) => {
+            const t = Math.min(1, (now - started) / 620);
+            const eased = 1 - Math.pow(1 - t, 3);
+            displayedProgress = from + (100 - from) * eased;
+            renderDisplayedProgress();
+            if (t < 1) {
+                window.requestAnimationFrame(finishFrame);
+            } else {
+                resolve();
+            }
+        };
+        window.requestAnimationFrame(finishFrame);
+    });
+
     const setProcessing = (processing) => {
         status.classList.toggle("is-visible", processing);
         submitButton.disabled = processing;
@@ -97,16 +207,24 @@
         submitButton.querySelector("span").textContent = processing
             ? "Обработка..."
             : "Запустить обработку";
-        if (!processing) stopTimer();
+        if (processing) {
+            startProgressAnimation();
+        } else {
+            stopProgressAnimation();
+            stopTimer();
+        }
     };
 
-    const setProgress = (value, message) => {
+    const setProgress = (value, message, immediate = false) => {
         const normalized = Math.max(0, Math.min(100, Number(value) || 0));
-        progress.value = normalized;
-        progress.textContent = `${normalized}%`;
-        percent.value = String(normalized);
-        percent.textContent = String(normalized);
-        if (message) processingMessage.textContent = message;
+        serverProgress = normalized;
+        if (immediate) {
+            displayedProgress = normalized;
+            renderDisplayedProgress();
+        }
+        if (message && (immediate || currentStatus === "cancelling")) {
+            processingMessage.textContent = message;
+        }
     };
 
     const showError = (message) => {
@@ -173,13 +291,14 @@
             return;
         }
 
-        setProcessing(false);
         if (snapshot.status === "completed") {
-            setProgress(100, snapshot.message);
+            await completeProgress(snapshot.message);
+            setProcessing(false);
             await loadResult(snapshot);
             return;
         }
 
+        setProcessing(false);
         if (snapshot.status === "cancelled") {
             showError("Операция отменена.");
         } else if (snapshot.status === "error") {
@@ -239,8 +358,13 @@
         clearError();
         clearResult();
         startedAt = Date.now();
+        processingStartedAt = performance.now();
+        serverProgress = 0;
+        displayedProgress = 0;
+        lastRenderedPercent = -1;
+        playfulMessageIndex = -1;
         currentStatus = "queued";
-        setProgress(0, "Загружаем файлы");
+        setProgress(0, "Загружаем файлы", true);
         setProcessing(true);
         startTimer();
 
