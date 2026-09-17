@@ -197,7 +197,7 @@ class ProcessingRuleTests(unittest.TestCase):
                 for row in worksheet.iter_rows(min_row=2, values_only=True)
             ]
             totals_by_date = {
-                str(row["Дата"])[:10]: row["Общая задолженность"]
+                str(row["Дата"])[:10]: row["Сумма"]
                 for row in rows
             }
             self.assertEqual(
@@ -206,7 +206,7 @@ class ProcessingRuleTests(unittest.TestCase):
             )
             workbook.close()
 
-    def test_total_detail_amount_replaces_borrower_name_in_result(self) -> None:
+    def test_detail_output_excludes_total_debt_column(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             statement = root / "statement.xlsx"
@@ -248,9 +248,11 @@ class ProcessingRuleTests(unittest.TestCase):
                 dict(zip(headers, row))
                 for row in worksheet.iter_rows(min_row=2, values_only=True)
             ]
-            self.assertIn("Общая задолженность", headers)
+            self.assertNotIn("Общая задолженность", headers)
+            self.assertNotIn("компания", headers)
+            self.assertNotIn("Взыскатель", headers)
             self.assertNotIn("ФИО (заёмщика)", headers)
-            self.assertEqual([row["Общая задолженность"] for row in rows], [300, 300])
+            self.assertEqual([row["Сумма"] for row in rows], [100, 200])
             workbook.close()
 
     def test_debt_balance_checks_only_dbz_named_in_purpose(self) -> None:
@@ -509,7 +511,9 @@ class ProcessingRuleTests(unittest.TestCase):
             )
             self.assertEqual(payment["ИИН"], "800908402859")
             self.assertEqual(payment["ДБЗ"], "DBZ-DEBTOR")
-            self.assertEqual(payment["Общая задолженность"], 2500)
+            self.assertNotIn("Общая задолженность", headers)
+            self.assertNotIn("компания", headers)
+            self.assertNotIn("Взыскатель", headers)
             self.assertEqual(payment["Оплата через"], "ЧСИ")
             workbook.close()
 
@@ -766,7 +770,9 @@ class ProcessingRuleTests(unittest.TestCase):
                     next(workbook["Оплата"].iter_rows(min_row=2, values_only=True)),
                 )
             )
-            self.assertIsNone(payment_row["Общая задолженность"])
+            self.assertNotIn("Общая задолженность", payment_headers)
+            self.assertNotIn("компания", payment_headers)
+            self.assertNotIn("Взыскатель", payment_headers)
             self.assertEqual(workbook["Не найдено"].max_row - 1, 1)
             self.assertEqual(workbook["Журнал пропусков"].max_row - 1, 2)
             reasons = [

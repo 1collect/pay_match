@@ -52,15 +52,12 @@ from .ner_service import PersonNameExtractor
 NEW_OUTPUT_COLUMNS = [
     "ДБЗ",
     "ИИН",
-    "Общая задолженность",
     "Дата",
     "Отправитель",
     "Сумма",
     "Назначение платежа",
     "Оплата через",
     "Номерсчета",
-    "компания",
-    "Взыскатель",
 ]
 
 NEW_NOT_FOUND_COLUMNS = NEW_OUTPUT_COLUMNS + [
@@ -1195,7 +1192,6 @@ class NewBankStatementProcessor:
             return
 
         if match.entry:
-            base_row["Общая задолженность"] = match.entry.debt_balance
             matched_rows.append(_matched_output_row(match.entry, base_row))
             return
 
@@ -1261,7 +1257,6 @@ class NewBankStatementProcessor:
             base_row = _base_output_row(
                 context,
                 detail_row.amount,
-                total_debt=detail_total,
             )
             if reason == "not_found":
                 not_found_rows.append(
@@ -1814,10 +1809,8 @@ def _skipped_statement_row(
 def _base_output_row(
     record: NewPaymentRecord,
     amount: float,
-    total_debt: float | str = "",
 ) -> dict[str, Any]:
     return {
-        "Общая задолженность": total_debt,
         "Дата": record.date,
         "Отправитель": record.sender,
         "Сумма": amount,
