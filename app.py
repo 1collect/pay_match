@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hmac
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -17,6 +19,14 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from flask_sock import Sock
 
 from processor.services.excel_processor import ProcessingError
+from processor.services.history_store import (
+    add_history_entry,
+    delete_history_entry,
+    initialize_history_store,
+    list_history,
+    prune_expired_history,
+    update_history_entry,
+)
 from processor.services.new_format_processor import (
     NewBankStatementProcessor,
     ProcessingCancelled,
@@ -25,16 +35,28 @@ from processor.services.new_format_processor import (
 
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xls"}
 RESULT_TTL_SECONDS = int(os.getenv("RESULT_TTL_MINUTES", "30")) * 60
+MAX_WS_MANIFEST_BYTES = 64 * 1024
+MAX_WS_FILES = 100
+PAYMENTS_API_TOKEN = os.getenv("PAYMENTS_API_TOKEN", "").strip()
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+app.config["SOCK_SERVER_OPTIONS"] = {
+    "max_message_size": app.config["MAX_CONTENT_LENGTH"],
+    "ping_interval": 25,
+}
 sock = Sock(app)
+initialize_history_store()
 
 
 @dataclass
 class Operation:
     operation_id: str
     client_id: str
+    statement_files: list[str] = field(default_factory=list, repr=False)
+    reference_file: str = field(default="", repr=False)
+    detail_files: list[str] = field(default_factory=list, repr=False)
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -78,6 +100,24 @@ def index() -> str:
     return render_template("index.html")
 
 
+@app.get("/history")
+def history_page() -> Response:
+    response = app.make_response(render_template("history.html"))
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+@app.get("/api/history")
+def operation_history() -> Response | tuple[Response, int]:
+    client_id = _normalized_uuid(request.args.get("client_id", ""))
+    if not client_id:
+        return _error("Некорректный идентификатор браузера.")
+    response = jsonify({"items": list_history(client_id), "retention_days": 30})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 @app.post("/operations")
 def create_operation() -> tuple[Response, int]:
     client_id = _normalized_uuid(request.form.get("client_id", ""))
@@ -106,6 +146,17 @@ def create_operation() -> tuple[Response, int]:
         statement_paths = _save_uploads(statement_files, temp_dir / "statements")
         detail_paths = _save_uploads(detail_files, temp_dir / "details")
         reference_path = _save_uploads([reference_file], temp_dir / "reference")[0]
+        operation.statement_files = [path.name for path in statement_paths]
+        operation.reference_file = reference_path.name
+        operation.detail_files = [path.name for path in detail_paths]
+        add_history_entry(
+            operation_id=operation.operation_id,
+            client_id=operation.client_id,
+            created_at=operation.created_at,
+            statement_files=operation.statement_files,
+            reference_file=operation.reference_file,
+            detail_files=operation.detail_files,
+        )
         with operations_lock:
             operations[operation.operation_id] = operation
         executor.submit(
@@ -120,6 +171,10 @@ def create_operation() -> tuple[Response, int]:
         shutil.rmtree(temp_dir, ignore_errors=True)
         with operations_lock:
             operations.pop(operation.operation_id, None)
+        try:
+            delete_history_entry(operation.operation_id, operation.client_id)
+        except Exception:
+            logger.exception("Could not remove incomplete history entry")
         return _error("Не удалось принять файлы для обработки.", 500)
 
     return jsonify(operation.snapshot()), 202
@@ -140,13 +195,17 @@ def cancel_operation(operation_id: str) -> Response | tuple[Response, int]:
     if operation is None:
         return _error("Операция не найдена.", 404)
 
+    history_changed = False
     with operation.condition:
         if operation.status in {"queued", "processing", "cancelling"}:
             operation.cancel_event.set()
+            history_changed = operation.status != "cancelling"
             operation.status = "cancelling"
             operation.message = "Отмена операции..."
             operation.version += 1
             operation.condition.notify_all()
+    if history_changed:
+        _sync_operation_history(operation)
     return jsonify(operation.snapshot())
 
 
@@ -197,6 +256,156 @@ def operation_socket(ws: Any) -> None:
                 return
     except Exception:
         return
+
+
+@sock.route("/api/v1/ws/process")
+def process_websocket_api(ws: Any) -> None:
+    operation_id = str(uuid4())
+    if not PAYMENTS_API_TOKEN:
+        _send_websocket_error(
+            ws,
+            operation_id,
+            "service_unconfigured",
+            "PAYMENTS_API_TOKEN is not configured.",
+        )
+        return
+    authorization = request.headers.get("Authorization", "").encode("utf-8")
+    expected_authorization = f"Bearer {PAYMENTS_API_TOKEN}".encode("utf-8")
+    if not hmac.compare_digest(authorization, expected_authorization):
+        _send_websocket_error(ws, operation_id, "unauthorized", "A valid bearer token is required.")
+        return
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"payment-registry-ws-{operation_id}-"))
+    request_id: str | None = None
+    actor: dict[str, str] | None = None
+    try:
+        first_message = ws.receive(timeout=30)
+        if not isinstance(first_message, str):
+            raise ValueError("The first WebSocket message must be a JSON text manifest.")
+        if len(first_message.encode("utf-8")) > MAX_WS_MANIFEST_BYTES:
+            raise ValueError("The WebSocket manifest is too large.")
+        try:
+            manifest = json.loads(first_message)
+        except json.JSONDecodeError as exc:
+            raise ValueError("The WebSocket manifest is not valid JSON.") from exc
+
+        request_id, actor = _parse_websocket_context(manifest)
+        if manifest.get("type") != "start":
+            raise ValueError('The first message must have type "start".')
+        file_specs = _parse_websocket_manifest(manifest)
+        audit_context = {"request_id": request_id, "actor": actor}
+        total_bytes = sum(item["size"] for item in file_specs)
+        _send_websocket_json(
+            ws,
+            {
+                "type": "accepted",
+                "operation_id": operation_id,
+                "status": "receiving",
+                "total_files": len(file_specs),
+                "total_bytes": total_bytes,
+                **audit_context,
+            },
+        )
+
+        paths: dict[str, list[Path]] = {"statements": [], "reference": [], "details": []}
+        received_bytes = 0
+        for index, item in enumerate(file_specs, start=1):
+            file_data = ws.receive()
+            if not isinstance(file_data, bytes):
+                raise ValueError(f"File {index} must be sent as a binary WebSocket message.")
+            if len(file_data) != item["size"]:
+                raise ValueError(
+                    f"File {index} size mismatch: expected {item['size']} bytes, got {len(file_data)}."
+                )
+
+            destination = _unique_upload_path(
+                temp_dir / item["group"],
+                item["name"],
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(file_data)
+            paths[item["group"]].append(destination)
+            received_bytes += len(file_data)
+            _send_websocket_json(
+                ws,
+                {
+                    "type": "upload_progress",
+                    "operation_id": operation_id,
+                    "received_files": index,
+                    "total_files": len(file_specs),
+                    "received_bytes": received_bytes,
+                    "total_bytes": total_bytes,
+                    **audit_context,
+                },
+            )
+
+        _send_websocket_json(
+            ws,
+            {
+                "type": "progress",
+                "operation_id": operation_id,
+                "status": "processing",
+                "progress": 1,
+                "message": "Processing started.",
+                **audit_context,
+            },
+        )
+        result = NewBankStatementProcessor().process_many(
+            statement_paths=paths["statements"],
+            reference_path=paths["reference"][0],
+            output_dir=temp_dir / "output",
+            detail_paths=paths["details"],
+            on_progress=lambda progress, message: _send_websocket_json(
+                ws,
+                {
+                    "type": "progress",
+                    "operation_id": operation_id,
+                    "status": "processing",
+                    "progress": progress,
+                    "message": message,
+                    **audit_context,
+                },
+            ),
+        )
+        result_bytes = result.registry_path.read_bytes()
+        stats = {
+            "total": result.total_statement_rows,
+            "generated": result.generated_records,
+            "matched": result.matched_rows,
+            "notFound": result.not_found_rows,
+            "excluded": result.excluded_rows,
+            "split": result.split_rows,
+        }
+        _send_websocket_json(
+            ws,
+            {
+                "type": "complete",
+                "operation_id": operation_id,
+                "status": "completed",
+                "progress": 100,
+                "filename": "registry.xlsx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "size": len(result_bytes),
+                "stats": stats,
+                **audit_context,
+            },
+        )
+        ws.send(result_bytes)
+    except ValueError as exc:
+        _send_websocket_error(ws, operation_id, "invalid_request", str(exc), request_id, actor)
+    except ProcessingError as exc:
+        _send_websocket_error(ws, operation_id, "processing_error", str(exc), request_id, actor)
+    except Exception:
+        _send_websocket_error(
+            ws,
+            operation_id,
+            "internal_error",
+            "Could not process the uploaded Excel files.",
+            request_id,
+            actor,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.errorhandler(413)
@@ -287,7 +496,9 @@ def _update_operation(
     stats: dict[str, int] | None = None,
     finished: bool = False,
 ) -> None:
+    history_changed = False
     with operation.condition:
+        previous_status = operation.status
         if operation.cancel_event.is_set() and status == "processing":
             status = "cancelling"
             message = "Отмена операции..."
@@ -307,8 +518,28 @@ def _update_operation(
             operation.stats = stats
         if finished:
             operation.finished_at = time.time()
+        history_changed = operation.status != previous_status or finished
         operation.version += 1
         operation.condition.notify_all()
+    if history_changed:
+        _sync_operation_history(operation)
+
+
+def _sync_operation_history(operation: Operation) -> None:
+    with operation.condition:
+        history = {
+            "operation_id": operation.operation_id,
+            "client_id": operation.client_id,
+            "status": operation.status,
+            "started_at": operation.started_at,
+            "finished_at": operation.finished_at,
+            "stats": dict(operation.stats),
+            "error": operation.error,
+        }
+    try:
+        update_history_entry(**history)
+    except Exception:
+        logger.exception("Could not update history for operation %s", operation.operation_id)
 
 
 def _owned_operation(operation_id: str, client_id: str) -> Operation | None:
@@ -358,6 +589,121 @@ def _save_uploads(uploaded_files: list, directory: Path) -> list[Path]:
     return paths
 
 
+def _parse_websocket_context(manifest: Any) -> tuple[str, dict[str, str]]:
+    if not isinstance(manifest, dict):
+        raise ValueError("The WebSocket manifest must be a JSON object.")
+    request_id_value = manifest.get("request_id")
+    if isinstance(request_id_value, bool) or not isinstance(request_id_value, (str, int)):
+        raise ValueError("A payments request_id string or integer is required.")
+    request_id = str(request_id_value).strip()
+    if not request_id or len(request_id) > 128:
+        raise ValueError("The payments request_id must contain 1 to 128 characters.")
+
+    actor_value = manifest.get("actor")
+    if not isinstance(actor_value, dict):
+        raise ValueError("The actor object with id and username is required.")
+    actor_id_value = actor_value.get("id")
+    actor_username = actor_value.get("username")
+    if isinstance(actor_id_value, bool) or not isinstance(actor_id_value, (str, int)):
+        raise ValueError("The actor id must be a string or integer.")
+    actor_id = str(actor_id_value).strip()
+    if not actor_id or not isinstance(actor_username, str) or not actor_username.strip():
+        raise ValueError("The actor must include a non-empty id and username.")
+    actor = {"id": actor_id, "username": actor_username.strip()[:150]}
+    display_name = actor_value.get("display_name")
+    if display_name is not None:
+        if not isinstance(display_name, str):
+            raise ValueError("The actor display_name must be a string.")
+        actor["display_name"] = display_name.strip()[:200]
+
+    return request_id, actor
+
+
+def _parse_websocket_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    statements = manifest.get("statements")
+    reference = manifest.get("reference")
+    details = manifest.get("details", [])
+    if not isinstance(statements, list) or not statements:
+        raise ValueError("At least one statement file is required.")
+    if not isinstance(reference, dict):
+        raise ValueError("One reference file is required.")
+    if not isinstance(details, list):
+        raise ValueError('The "details" value must be a list.')
+
+    groups = [
+        ("statements", statements),
+        ("reference", [reference]),
+        ("details", details),
+    ]
+    file_count = sum(len(items) for _, items in groups)
+    if file_count > MAX_WS_FILES:
+        raise ValueError(f"No more than {MAX_WS_FILES} files can be sent in one operation.")
+
+    file_specs: list[dict[str, Any]] = []
+    total_bytes = 0
+    for group, items in groups:
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Each file entry must be an object with name and size fields.")
+            raw_name = item.get("name")
+            size = item.get("size")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise ValueError("Each file must have a non-empty name.")
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                raise ValueError("Each file must have a positive integer size in bytes.")
+
+            name = _safe_upload_name(raw_name)
+            if not _is_excel(name):
+                raise ValueError(
+                    f"Unsupported file type for {name}. Use .xlsx, .xlsm, .xltx, or .xls."
+                )
+            total_bytes += size
+            if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
+                limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+                raise ValueError(f"The total upload size exceeds the {limit_mb} MB limit.")
+            file_specs.append({"group": group, "name": name, "size": size})
+
+    return file_specs
+
+
+def _unique_upload_path(directory: Path, filename: str) -> Path:
+    destination = directory / filename
+    counter = 2
+    while destination.exists():
+        destination = directory / f"{Path(filename).stem} ({counter}){Path(filename).suffix}"
+        counter += 1
+    return destination
+
+
+def _send_websocket_json(ws: Any, payload: dict[str, Any]) -> None:
+    ws.send(json.dumps(payload, ensure_ascii=False))
+
+
+def _send_websocket_error(
+    ws: Any,
+    operation_id: str,
+    code: str,
+    message: str,
+    request_id: str | None = None,
+    actor: dict[str, str] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "type": "error",
+        "operation_id": operation_id,
+        "status": "error",
+        "code": code,
+        "error": message,
+    }
+    if request_id is not None:
+        payload["request_id"] = request_id
+    if actor is not None:
+        payload["actor"] = actor
+    try:
+        _send_websocket_json(ws, payload)
+    except Exception:
+        return
+
+
 def _cleanup_expired_operations() -> None:
     while True:
         time.sleep(60)
@@ -370,6 +716,10 @@ def _cleanup_expired_operations() -> None:
             ]
             for operation_id in expired_ids:
                 operations.pop(operation_id, None)
+        try:
+            prune_expired_history()
+        except Exception:
+            logger.exception("Could not prune expired processing history")
 
 
 def _remove_stale_temp_directories() -> None:

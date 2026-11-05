@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f7f4">
+    <meta name="robots" content="noindex, nofollow">
+    <title>История обработок — Реестр погашений</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='history.css') }}">
+</head>
+<body>
+    <main class="history-shell">
+        <header class="topbar history-topbar">
+            <a class="brand" href="/" aria-label="Реестр погашений">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M7 3.75h8.5L19 7.3v12.95H7z"/><path d="M15 3.75V8h4M10.5 12h5M10.5 15.5h5"/></svg>
+                </span>
+                <span>Реестр погашений</span>
+            </a>
+            <a class="history-back" href="/">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6 6-6-6 6-6"/></svg>
+                <span>К обработке файлов</span>
+            </a>
+        </header>
+
+        <section class="workspace history-workspace" aria-labelledby="historyTitle">
+            <div class="history-heading">
+                <div>
+                    <h1 id="historyTitle">История обработок</h1>
+                    <p>Операции за последние 30 дней</p>
+                </div>
+                <button class="history-refresh" id="refreshHistory" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4.8 9a7.5 7.5 0 0 1 12.8-2L20 12M4 17v-5h5m10.2 3a7.5 7.5 0 0 1-12.8 2L4 12"/></svg>
+                    <span>Обновить</span>
+                </button>
+            </div>
+
+            <div class="history-overview" id="historyOverview" hidden>
+                <span class="history-count" id="historyCount"></span>
+                <span class="history-updated" id="historyUpdated"></span>
+            </div>
+
+            <div class="history-toolbar" id="historyToolbar" hidden>
+                <label class="history-search">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m15.5 15.5 4.2 4.2"/></svg>
+                    <span class="visually-hidden">Поиск по названиям файлов</span>
+                    <input id="historySearch" type="search" placeholder="Найти файл" autocomplete="off">
+                </label>
+                <label class="history-filter">
+                    <span class="visually-hidden">Статус операции</span>
+                    <select id="historyStatus">
+                        <option value="all">Все статусы</option>
+                        <option value="completed">Завершена</option>
+                        <option value="processing">В работе</option>
+                        <option value="queued">В очереди</option>
+                        <option value="cancelling">Отмена</option>
+                        <option value="error">Ошибка</option>
+                        <option value="cancelled">Отменена</option>
+                        <option value="interrupted">Прервана</option>
+                    </select>
+                </label>
+                <span class="history-result-count" id="historyResultCount" aria-live="polite"></span>
+            </div>
+
+            <div class="history-loading" id="historyLoading" role="status" aria-live="polite">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Загружаем историю</span>
+            </div>
+
+            <div class="history-error" id="historyError" role="alert" hidden>
+                <div>
+                    <strong>Не удалось загрузить историю</strong>
+                    <p id="historyErrorMessage">Проверьте соединение и попробуйте снова.</p>
+                </div>
+                <button type="button" id="retryHistory">Повторить</button>
+            </div>
+
+            <section class="history-empty" id="historyEmpty" aria-live="polite" hidden>
+                <span class="history-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><path d="M14 7.5h13l8 8v24H14z"/><path d="M27 7.5v9h8M20 25h9M20 30h9M20 35h5"/><path d="M9 13v29h23"/></svg>
+                </span>
+                <h2 id="historyEmptyTitle">Истории пока нет</h2>
+                <p id="historyEmptyMessage">Записи обработок за последние 30 дней появятся здесь.</p>
+            </section>
+
+            <div class="history-table-scroll" id="historyTableScroll" tabindex="0" aria-label="Таблица истории обработок" hidden>
+                <table class="history-table">
+                    <caption class="visually-hidden">История операций по обработке файлов за последние 30 дней</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Дата и время</th>
+                            <th scope="col">Статус</th>
+                            <th scope="col">Файлы</th>
+                            <th scope="col" class="numeric-heading">Строки</th>
+                            <th scope="col" class="numeric-heading">Найдено</th>
+                            <th scope="col" class="numeric-heading">Не найдено</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyRows"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <footer class="history-footer">
+            <span>Показаны операции текущего браузера</span>
+            <span>Записи старше 30 дней удаляются автоматически</span>
+        </footer>
+    </main>
+    <script src="{{ url_for('static', filename='history.js') }}"></script>
+</body>
+</html>
