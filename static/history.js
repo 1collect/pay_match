@@ -1,5 +1,4 @@
 (() => {
-    const CLIENT_KEY = "paymentRegistryClientId";
     const ACTIVE_STATUSES = new Set(["queued", "processing", "cancelling"]);
     const STATUS_LABELS = {
         queued: "В очереди",
@@ -234,21 +233,10 @@
         setBusy(true);
 
         try {
-            let clientId = null;
-            try {
-                clientId = localStorage.getItem(CLIENT_KEY);
-            } catch (_storageError) {
-                clientId = null;
-            }
-            if (!clientId) {
-                historyItems = [];
-            } else {
-                const query = new URLSearchParams({ client_id: clientId });
-                const response = await fetch(`/api/history?${query}`, { cache: "no-store" });
-                const payload = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(payload.error || "Проверьте соединение и попробуйте снова.");
-                historyItems = Array.isArray(payload.items) ? payload.items : [];
-            }
+            const response = await fetch("/api/history", { cache: "no-store" });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || "Проверьте соединение и попробуйте снова.");
+            historyItems = Array.isArray(payload.items) ? payload.items : [];
             loadedAt = new Date();
             render();
         } catch (requestError) {
@@ -270,9 +258,6 @@
     retryButton.addEventListener("click", loadHistory);
     search.addEventListener("input", render);
     statusFilter.addEventListener("change", render);
-    window.addEventListener("storage", (event) => {
-        if (event.key === CLIENT_KEY) loadHistory();
-    });
 
     loadHistory();
 })();

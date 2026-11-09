@@ -110,10 +110,7 @@ def history_page() -> Response:
 
 @app.get("/api/history")
 def operation_history() -> Response | tuple[Response, int]:
-    client_id = _normalized_uuid(request.args.get("client_id", ""))
-    if not client_id:
-        return _error("Некорректный идентификатор браузера.")
-    response = jsonify({"items": list_history(client_id), "retention_days": 30})
+    response = jsonify({"items": list_history(), "retention_days": 30})
     response.headers["Cache-Control"] = "private, no-store"
     return response
 

@@ -143,7 +143,7 @@ def prune_expired_history() -> None:
         _prune_expired(connection)
 
 
-def list_history(client_id: str) -> list[dict]:
+def list_history() -> list[dict]:
     with _connection() as connection:
         _prune_expired(connection)
         rows = connection.execute(
@@ -151,10 +151,8 @@ def list_history(client_id: str) -> list[dict]:
             SELECT operation_id, created_at, started_at, finished_at, status,
                    statement_files, reference_file, detail_files, stats, error
             FROM operation_history
-            WHERE client_id = ?
             ORDER BY created_at DESC
             """,
-            (client_id,),
         ).fetchall()
 
     items = []
