@@ -93,13 +93,31 @@
 
     const allFileEntries = (item) => [
         ...(Array.isArray(item.statement_files)
-            ? item.statement_files.map((filename) => ({ filename, kind: "Выписка" }))
+            ? item.statement_files.map((filename, index) => ({
+                filename,
+                kind: "Выписка",
+                group: "statements",
+                index,
+                available: item.downloads?.statements?.[index] === true,
+            }))
             : []),
         ...(typeof item.reference_file === "string" && item.reference_file
-            ? [{ filename: item.reference_file, kind: "Справочник" }]
+            ? [{
+                filename: item.reference_file,
+                kind: "Справочник",
+                group: "reference",
+                index: 0,
+                available: item.downloads?.reference?.[0] === true,
+            }]
             : []),
         ...(Array.isArray(item.detail_files)
-            ? item.detail_files.map((filename) => ({ filename, kind: "Расшифровка" }))
+            ? item.detail_files.map((filename, index) => ({
+                filename,
+                kind: "Расшифровка",
+                group: "details",
+                index,
+                available: item.downloads?.details?.[index] === true,
+            }))
             : []),
     ].filter((entry) => typeof entry.filename === "string" && entry.filename.length > 0);
 
@@ -122,14 +140,34 @@
         if (files.length) {
             const list = document.createElement("ul");
             list.className = "history-file-list";
-            files.forEach(({ filename, kind: fileKind }) => {
+            files.forEach(({ filename, kind: fileKind, group, index, available }) => {
                 const listItem = document.createElement("li");
                 const kind = document.createElement("span");
                 kind.className = "history-file-kind";
                 kind.textContent = `${fileKind} · `;
                 listItem.append(kind, document.createTextNode(filename));
+                if (available) {
+                    const download = document.createElement("a");
+                    download.className = "history-download-link";
+                    download.href = `/history/${encodeURIComponent(item.operation_id)}/input/${group}/${index}`;
+                    download.textContent = "Скачать";
+                    download.setAttribute("aria-label", `Скачать ${filename}`);
+                    listItem.append(document.createTextNode(" · "), download);
+                }
                 list.append(listItem);
             });
+            if (item.downloads?.result === true) {
+                const resultItem = document.createElement("li");
+                const kind = document.createElement("span");
+                kind.className = "history-file-kind";
+                kind.textContent = "Результат · ";
+                const download = document.createElement("a");
+                download.className = "history-download-link";
+                download.href = `/history/${encodeURIComponent(item.operation_id)}/result`;
+                download.textContent = "Скачать registry.xlsx";
+                resultItem.append(kind, download);
+                list.append(resultItem);
+            }
             details.append(list);
         }
 

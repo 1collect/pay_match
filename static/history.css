@@ -255,6 +255,8 @@
 
 .history-file-list li { overflow-wrap: anywhere; }
 .history-file-kind { color: var(--text); font-weight: 600; }
+.history-download-link { color: var(--accent); font-weight: 600; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.history-download-link:hover { color: var(--accent-strong, #124d3e); }
 
 .history-operation-error {
     margin: 10px 0 0;

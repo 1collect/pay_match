@@ -20,8 +20,11 @@ from flask_sock import Sock
 
 from processor.services.excel_processor import ProcessingError
 from processor.services.history_store import (
+    DATABASE_PATH as HISTORY_DATABASE_PATH,
+    RETENTION_SECONDS,
     add_history_entry,
     delete_history_entry,
+    get_history_entry,
     initialize_history_store,
     list_history,
     prune_expired_history,
@@ -35,6 +38,9 @@ from processor.services.new_format_processor import (
 
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xls"}
 RESULT_TTL_SECONDS = int(os.getenv("RESULT_TTL_MINUTES", "30")) * 60
+HISTORY_FILES_DIR = Path(
+    os.getenv("HISTORY_FILES_DIR", str(HISTORY_DATABASE_PATH.parent / "history_files"))
+).expanduser()
 MAX_WS_MANIFEST_BYTES = 64 * 1024
 MAX_WS_FILES = 100
 PAYMENTS_API_TOKEN = os.getenv("PAYMENTS_API_TOKEN", "").strip()
@@ -110,9 +116,51 @@ def history_page() -> Response:
 
 @app.get("/api/history")
 def operation_history() -> Response | tuple[Response, int]:
-    response = jsonify({"items": list_history(), "retention_days": 30})
+    items = list_history()
+    for item in items:
+        item["downloads"] = _history_downloads(item)
+    response = jsonify({"items": items, "retention_days": 30})
     response.headers["Cache-Control"] = "private, no-store"
     return response
+
+
+@app.get("/history/<operation_id>/input/<file_group>/<int:file_index>")
+def download_history_input(
+    operation_id: str,
+    file_group: str,
+    file_index: int,
+) -> Response | tuple[Response, int]:
+    entry = _history_entry(operation_id)
+    if entry is None:
+        return _error("Файл в истории не найден.", 404)
+
+    if file_group == "statements":
+        filenames = entry["statement_files"]
+    elif file_group == "reference":
+        filenames = [entry["reference_file"]]
+    elif file_group == "details":
+        filenames = entry["detail_files"]
+    else:
+        return _error("Файл в истории не найден.", 404)
+
+    if file_index < 0 or file_index >= len(filenames):
+        return _error("Файл в истории не найден.", 404)
+    filename = filenames[file_index]
+    path = _stored_history_file(entry["operation_id"], file_group, filename)
+    if path is None or not path.is_file():
+        return _error("Файл истории больше недоступен.", 404)
+    return _history_attachment(path, filename)
+
+
+@app.get("/history/<operation_id>/result")
+def download_history_result(operation_id: str) -> Response | tuple[Response, int]:
+    entry = _history_entry(operation_id)
+    if entry is None or entry["status"] != "completed":
+        return _error("Результат обработки не найден.", 404)
+    path = _stored_history_file(entry["operation_id"], "output", "registry.xlsx")
+    if path is None or not path.is_file():
+        return _error("Результат обработки недоступен.", 404)
+    return _history_attachment(path, "registry.xlsx")
 
 
 @app.post("/operations")
@@ -139,13 +187,16 @@ def create_operation() -> tuple[Response, int]:
 
     operation = Operation(operation_id=str(uuid4()), client_id=client_id)
     temp_dir = Path(tempfile.mkdtemp(prefix=f"payment-registry-{operation.operation_id}-"))
+    history_dir = _history_operation_dir(operation.operation_id)
     try:
-        statement_paths = _save_uploads(statement_files, temp_dir / "statements")
-        detail_paths = _save_uploads(detail_files, temp_dir / "details")
-        reference_path = _save_uploads([reference_file], temp_dir / "reference")[0]
+        history_dir.mkdir(parents=True, exist_ok=False)
+        statement_paths = _save_uploads(statement_files, history_dir / "statements")
+        detail_paths = _save_uploads(detail_files, history_dir / "details")
+        reference_path = _save_uploads([reference_file], history_dir / "reference")[0]
         operation.statement_files = [path.name for path in statement_paths]
         operation.reference_file = reference_path.name
         operation.detail_files = [path.name for path in detail_paths]
+        os.utime(history_dir, (operation.created_at, operation.created_at))
         add_history_entry(
             operation_id=operation.operation_id,
             client_id=operation.client_id,
@@ -166,6 +217,7 @@ def create_operation() -> tuple[Response, int]:
         )
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(history_dir, ignore_errors=True)
         with operations_lock:
             operations.pop(operation.operation_id, None)
         try:
@@ -437,6 +489,13 @@ def _run_operation(
             raise ProcessingCancelled("Операция отменена")
 
         result_bytes = result.registry_path.read_bytes()
+        result_archive = _history_operation_dir(operation.operation_id) / "output" / "registry.xlsx"
+        result_archive.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(result.registry_path, result_archive)
+        os.utime(
+            _history_operation_dir(operation.operation_id),
+            (operation.created_at, operation.created_at),
+        )
         stats = {
             "total": result.total_statement_rows,
             "generated": result.generated_records,
@@ -549,6 +608,65 @@ def _owned_operation(operation_id: str, client_id: str) -> Operation | None:
     if operation is None or operation.client_id != normalized_client_id:
         return None
     return operation
+
+
+def _history_entry(operation_id: str) -> dict | None:
+    normalized_operation_id = _normalized_uuid(operation_id)
+    if not normalized_operation_id:
+        return None
+    return get_history_entry(normalized_operation_id)
+
+
+def _history_operation_dir(operation_id: str) -> Path:
+    return HISTORY_FILES_DIR / operation_id
+
+
+def _stored_history_file(operation_id: str, file_group: str, filename: str) -> Path | None:
+    if not isinstance(filename, str) or not filename:
+        return None
+    safe_name = _safe_upload_name(filename)
+    if safe_name != filename:
+        return None
+    group_dir = (_history_operation_dir(operation_id) / file_group).resolve()
+    path = (group_dir / safe_name).resolve()
+    if path.parent != group_dir:
+        return None
+    return path
+
+
+def _stored_history_file_exists(operation_id: str, file_group: str, filename: str) -> bool:
+    path = _stored_history_file(operation_id, file_group, filename)
+    return path is not None and path.is_file()
+
+
+def _history_attachment(path: Path, filename: str) -> Response:
+    response = send_file(path, as_attachment=True, download_name=filename)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+def _history_downloads(entry: dict) -> dict[str, Any]:
+    statements = entry["statement_files"]
+    details = entry["detail_files"]
+    return {
+        "statements": [
+            _stored_history_file_exists(entry["operation_id"], "statements", name)
+            for name in statements
+        ],
+        "reference": [
+            _stored_history_file_exists(
+                entry["operation_id"], "reference", entry["reference_file"]
+            )
+        ],
+        "details": [
+            _stored_history_file_exists(entry["operation_id"], "details", name)
+            for name in details
+        ],
+        "result": bool(
+            entry["status"] == "completed"
+            and _stored_history_file_exists(entry["operation_id"], "output", "registry.xlsx")
+        ),
+    }
 
 
 def _normalized_uuid(value: str) -> str:
@@ -715,6 +833,7 @@ def _cleanup_expired_operations() -> None:
                 operations.pop(operation_id, None)
         try:
             prune_expired_history()
+            _prune_expired_history_files()
         except Exception:
             logger.exception("Could not prune expired processing history")
 
@@ -726,11 +845,28 @@ def _remove_stale_temp_directories() -> None:
             shutil.rmtree(directory, ignore_errors=True)
 
 
+def _prune_expired_history_files() -> None:
+    if not HISTORY_FILES_DIR.is_dir():
+        return
+    cutoff = time.time() - RETENTION_SECONDS
+    with operations_lock:
+        active_ids = set(operations)
+    for directory in HISTORY_FILES_DIR.iterdir():
+        if not directory.is_dir() or directory.name in active_ids:
+            continue
+        try:
+            if directory.stat().st_mtime < cutoff:
+                shutil.rmtree(directory, ignore_errors=True)
+        except OSError:
+            logger.exception("Could not prune history files in %s", directory)
+
+
 def _error(message: str, status: int = 400) -> tuple[Response, int]:
     return jsonify(error=message), status
 
 
 _remove_stale_temp_directories()
+_prune_expired_history_files()
 threading.Thread(
     target=_cleanup_expired_operations,
     name="operation-cleanup",

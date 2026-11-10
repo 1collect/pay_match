@@ -155,23 +155,37 @@ def list_history() -> list[dict]:
             """,
         ).fetchall()
 
-    items = []
-    for row in rows:
-        items.append(
-            {
-                "operation_id": row["operation_id"],
-                "created_at": row["created_at"],
-                "started_at": row["started_at"],
-                "finished_at": row["finished_at"],
-                "status": row["status"],
-                "statement_files": _load_json(row["statement_files"], []),
-                "reference_file": row["reference_file"],
-                "detail_files": _load_json(row["detail_files"], []),
-                "stats": _load_json(row["stats"], {}),
-                "error": row["error"],
-            }
-        )
-    return items
+    return [_history_item(row) for row in rows]
+
+
+def get_history_entry(operation_id: str) -> dict | None:
+    with _connection() as connection:
+        _prune_expired(connection)
+        row = connection.execute(
+            """
+            SELECT operation_id, created_at, started_at, finished_at, status,
+                   statement_files, reference_file, detail_files, stats, error
+            FROM operation_history
+            WHERE operation_id = ?
+            """,
+            (operation_id,),
+        ).fetchone()
+    return _history_item(row) if row is not None else None
+
+
+def _history_item(row: sqlite3.Row) -> dict:
+    return {
+        "operation_id": row["operation_id"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "status": row["status"],
+        "statement_files": _load_json(row["statement_files"], []),
+        "reference_file": row["reference_file"],
+        "detail_files": _load_json(row["detail_files"], []),
+        "stats": _load_json(row["stats"], {}),
+        "error": row["error"],
+    }
 
 
 def _prune_expired(connection: sqlite3.Connection) -> None:
