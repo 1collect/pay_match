@@ -14,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from flask_sock import Sock
@@ -150,6 +151,41 @@ def download_history_input(
     if path is None or not path.is_file():
         return _error("Файл истории больше недоступен.", 404)
     return _history_attachment(path, filename)
+
+
+@app.get("/history/<operation_id>/statements.zip")
+def download_history_statements(operation_id: str) -> Response | tuple[Response, int]:
+    entry = _history_entry(operation_id)
+    if entry is None or not entry["statement_files"]:
+        return _error("Выписки в истории не найдены.", 404)
+
+    paths = []
+    for filename in entry["statement_files"]:
+        path = _stored_history_file(entry["operation_id"], "statements", filename)
+        if path is None or not path.is_file():
+            return _error("Не все выписки доступны. Обновите историю.", 404)
+        paths.append((path, filename))
+
+    archive = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    try:
+        with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zipped:
+            for path, filename in paths:
+                zipped.write(path, arcname=filename)
+        archive.seek(0)
+        response = send_file(
+            archive,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"statements-{entry['operation_id']}.zip",
+        )
+    except FileNotFoundError:
+        archive.close()
+        return _error("Не все выписки доступны. Обновите историю.", 404)
+    except Exception:
+        archive.close()
+        raise
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @app.get("/history/<operation_id>/result")

@@ -178,6 +178,14 @@
             details.append(message);
         }
         cell.append(details);
+        const statements = item.downloads?.statements;
+        if (Array.isArray(statements) && statements.length > 0 && statements.every((available) => available === true)) {
+            const download = document.createElement("a");
+            download.className = "history-download-link history-download-archive";
+            download.href = `/history/${encodeURIComponent(item.operation_id)}/statements.zip`;
+            download.textContent = "Скачать все выписки ZIP";
+            cell.append(download);
+        }
     };
 
     const appendRow = (item) => {
